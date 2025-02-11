@@ -1,0 +1,272 @@
+From b8bc3c516a56db0f96c14b7550db4359fa7362ba Mon Sep 17 00:00:00 2001
+From: "rafael.dousse" <rafael.dousse@heig-vd.ch>
+Date: Tue, 29 Oct 2024 17:47:55 +0100
+Subject: [PATCH] Fin de labo 5
+
+---
+ build.conf                |   2 +-
+ linux/usr/module/access.c | 193 +++++++++++++++++++++++++++++++++++---
+ qemu/hw/arm/vext/vext.c   |   5 +-
+ 3 files changed, 185 insertions(+), 15 deletions(-)
+
+diff --git a/build.conf b/build.conf
+index a0276ffa53..0d74b258d1 100644
+--- a/build.conf
++++ b/build.conf
+@@ -1,2 +1,2 @@
+-PLATFORM := virt32
++PLATFORM := rpi4
+ 
+diff --git a/linux/usr/module/access.c b/linux/usr/module/access.c
+index f33d47cb77..491439705b 100644
+--- a/linux/usr/module/access.c
++++ b/linux/usr/module/access.c
+@@ -4,24 +4,196 @@
+  * Copyright (c) 2020 HEIG-VD, REDS Institute
+  *******************************************************************/
+ 
++
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/printk.h>
++#include <linux/interrupt.h>
++
++#include <linux/mod_devicetable.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/of.h>
+ 
+ #include <asm/io.h>
+ 
+-#define VEXT_BASE 0x20000000
++#include "rpisense.h"
++
++# define VEXT 0
++// Offsets Registers
+ #define LED_OFFSET 0x3a
++#define SWITCHES_OFFSET 0x12
++#define IRQ_CTRL 0x18
++
+ #define LED_ON 0x1E
+ #define LED_OFF 0x0
++#define SWITCHES_MASK 0xFF
++#define IRQ_CLEAR (1 << 0)
++#define LED0 (1 << 0)
++#define LED1 (1 << 1)
++#define LED2 (1 << 2)
++#define LED3 (1 << 3)
++#define LED4 (1 << 4)
++#define SWITCH1 0x1
++#define SWITCH2 0x2
++#define SWITCH3 0x3
++#define SWITCH4 0x4
++#define SWITCH5 0x5
++
++//Private data structure
++typedef struct priv_data {
++	// Memory addresses for vext
++	void *mem_addr;
++	// Led address
++	void *led_addr;
++	// Switches address
++	void *switches;
++	// IRQ control address
++	void *irq_ctrl;
++	// IRQ number
++	int irqNum;
++} priv_data_t;
++
++static irqreturn_t irq_handler(int irq, void *dev_id)
++{
++	pr_info("(module): Interrupt received\n");
++	priv_data_t *priv = (priv_data_t *)dev_id;
++
++	uint16_t switches = ioread16(priv->switches);
++	uint16_t leds = ioread16(priv->led_addr);
++	uint16_t led;
++	// Toggle the LED corresponding to the switch
++	switch (switches & SWITCHES_MASK)
++	{
++		case SWITCH1:
++			led = LED0;
++			break;
++		case SWITCH2:
++			led = LED1;
++			break;
++		case SWITCH3:
++			led = LED2;
++			break;
++		case SWITCH4:
++			led = LED3;
++			break;
++		case SWITCH5:
++			led = LED4;
++			break;
++		default:
++			return IRQ_NONE;
++			
++	}
++
++	// Write the value of the switches to the LED
++	leds ^= led;
++	iowrite16(leds, priv->led_addr);
++
++    // Clear the IRQ by writing to IRQ_CTRL
++    iowrite16(IRQ_CLEAR, priv->irq_ctrl);
++
++	return IRQ_HANDLED;
++}
++
++
++static int vext_probe(struct platform_device *pdev)
++{
++	#if VEXT
++		priv_data_t *priv_data;
++		struct resource *res;	
++	
++		priv_data = kmalloc(sizeof(priv_data_t), GFP_KERNEL);
++
++		if (!priv_data){
++			return -ENOMEM;
++		}
++
++		platform_set_drvdata(pdev, priv_data);
++		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++		if (!res){
++			return -ENODEV;
++		}
++
++		priv_data->mem_addr = devm_ioremap_resource(&pdev->dev, res);
++		if (IS_ERR(priv_data->mem_addr)) {
++			return PTR_ERR(priv_data->mem_addr);
++		}
++
++		priv_data->led_addr = priv_data->mem_addr + LED_OFFSET;
++		priv_data->switches = priv_data->mem_addr + SWITCHES_OFFSET;
++		priv_data->irq_ctrl = priv_data->mem_addr + IRQ_CTRL;
++
++		//  Retrieve the IRQ number from the DT.
++		priv_data->irqNum = platform_get_irq(pdev, 0);
++		if (priv_data->irqNum < 0) {
++			return priv_data->irqNum;
++		}
++
++		// Register the interrupt handler associated with the IRQ
++		int err = request_irq(priv_data->irqNum, irq_handler, IRQF_TRIGGER_HIGH, "irq_handler", (void *)priv_data);
++		if (err != 0) {
++			return err;
++		}
++
++
++
++		iowrite16(LED_ON, priv_data->led_addr);
++		pr_info("(module): vext driver initialized, LED ON\n");
+ 
+-// Pointer to the IO mapped memory
+-void  *led_addr;
++	#else
++		rpisense_init();
++		display_led(0, true);
++		display_led(2, true);
++		display_led(4, true);
++	#endif
++
++
++	return 0;
++}
++
++static int vext_remove(struct platform_device *pdev)
++{
++	priv_data_t *priv_data = platform_get_drvdata(pdev);
++
++	#if VEXT
++	iowrite16(LED_OFF, priv_data->led_addr);
++	kfree(platform_get_drvdata(pdev));
++	free_irq(priv_data->irqNum, (void *)priv_data);
++	pr_info("(module): vext driver removed, LED OFF\n");
++	#else
++	pr_info("(module): rpisense driver removed\n");
++	#endif
++	
++	return 0;
++}
++
++MODULE_INFO(intree, "Y");
++MODULE_LICENSE("GPL");
++
++static const struct of_device_id vext_driver_id[] = {
++	{.compatible = "virt32,vext"},
++	{/* END */},
++};
++
++MODULE_DEVICE_TABLE(of, vext_driver_id);
++
++static struct platform_driver vext_driver = {
++	.driver = {
++		.name = "vext_driver",
++		.owner = THIS_MODULE,
++		.of_match_table = of_match_ptr(vext_driver_id),
++	},
++	.probe = vext_probe,
++	.remove = vext_remove,
++};
++
++module_platform_driver(vext_driver);
++
++
++
++/*
+ 
+-/**
+- * @brief Module initialization
+- */
+ static int access_init(void) {
+ 
+ 	printk("access: small driver for accessing I/O ...\n");
+@@ -35,9 +207,7 @@ static int access_init(void) {
+ 	return 0;
+ }
+ 
+-/**
+- * @brief Module exit
+- */
++
+ static void access_exit(void) {
+ 
+ 	printk("access: bye bye!\n");
+@@ -47,8 +217,7 @@ static void access_exit(void) {
+ }
+ 
+ module_init(access_init);
+-module_exit(access_exit);
++module_exit(access_exit); */
++
+ 
+-MODULE_INFO(intree, "Y");
+-MODULE_LICENSE("GPL");
+ 
+diff --git a/qemu/hw/arm/vext/vext.c b/qemu/hw/arm/vext/vext.c
+index 7d8df88489..0dd435bf36 100644
+--- a/qemu/hw/arm/vext/vext.c
++++ b/qemu/hw/arm/vext/vext.c
+@@ -138,7 +138,7 @@ static void vext_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+ 		cJSON_AddStringToObject(root, "device", "led");
+ 		cJSON_AddNumberToObject(root, "value", value);
+ 		vext_cmd_post(root);
+-
++		s->led_status = value;
+ 		break;
+ 	default:
+ 		// Nothing
+@@ -206,4 +206,5 @@ static void vext_register_types(void)
+ 	type_register_static(&vext_info);
+ }
+ 
+-type_init(vext_register_types)
+\ No newline at end of file
++type_init(vext_register_types)
++
+-- 
+GitLab
+

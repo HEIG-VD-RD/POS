@@ -1,0 +1,98 @@
+From 315c43d4f1b7d0bea7f0ad635f2a7cf428257798 Mon Sep 17 00:00:00 2001
+From: "rafael.dousse" <rafael.dousse@heig-vd.ch>
+Date: Fri, 4 Oct 2024 12:09:20 +0200
+Subject: [PATCH] End of lab
+
+---
+ build.conf              |  2 +-
+ qemu/hw/arm/vext/vext.c | 45 +++++++++++++++++++++++++++++++++++++++++
+ qemu/hw/arm/virt.c      |  2 +-
+ 3 files changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/build.conf b/build.conf
+index 0d74b258d1..a0276ffa53 100644
+--- a/build.conf
++++ b/build.conf
+@@ -1,2 +1,2 @@
+-PLATFORM := rpi4
++PLATFORM := virt32
+ 
+diff --git a/qemu/hw/arm/vext/vext.c b/qemu/hw/arm/vext/vext.c
+index bb480843ae..53a6da0b74 100644
+--- a/qemu/hw/arm/vext/vext.c
++++ b/qemu/hw/arm/vext/vext.c
+@@ -18,12 +18,57 @@
+  */
+ #include "vext.h"
+ #include "vext_emul.h"
++
++typedef struct vextState {
++	SysBusDevice busdev;
++	MemoryRegion iomem;
++	uint32_t led_status;
++} vextState_t;
++
++static void vext_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
++{
++	printf("vext_write\n");
++	cJSON *root = cJSON_CreateObject();
++
++	cJSON_AddStringToObject(root, "device", "led");
++	cJSON_AddStringToObject(root, "status",	"run"); /* Value of type string */
++	cJSON_AddNumberToObject(root, "value", value); /* Value of type integer */
++	vext_cmd_post(root);
++		
++}
++
++static const MemoryRegionOps vext_ops = {
++	.write = vext_write,
++	.endianness = DEVICE_NATIVE_ENDIAN,
++};
++
+ void vext_process_switch(void *opaque, cJSON *packet)
+ {
+ 	/* to be completed ... */
++	printf("vext_process_switch\n");
+ }
+ static void vext_init(Object *obj)
+ {
+ 	/* to be completed ... */
++
++	DeviceState *dev = DEVICE(obj);
++	vextState_t *s = OBJECT_CHECK(vextState_t, dev, "vext");
++	SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
++
++	memory_region_init_io(&s->iomem, obj, &vext_ops, s, "vext", 0x1000);
++	sysbus_init_mmio(sbd, &s->iomem);
+ 	vext_emul_init(obj);
+ }
++static const TypeInfo vext_info = {
++	.name = "vext",
++	.parent = TYPE_SYS_BUS_DEVICE,
++	.instance_size = sizeof(vextState_t),
++	.instance_init = vext_init,
++};
++
++static void vext_register_types(void)
++{
++	type_register_static(&vext_info);
++}
++
++type_init(vext_register_types)
+\ No newline at end of file
+diff --git a/qemu/hw/arm/virt.c b/qemu/hw/arm/virt.c
+index 546466dd6d..c4f987e86e 100644
+--- a/qemu/hw/arm/virt.c
++++ b/qemu/hw/arm/virt.c
+@@ -2365,7 +2365,7 @@ static void machvirt_init(MachineState *machine)
+     	   sysbus_create_simple("pl050_mouse", (hwaddr) vms->memmap[VIRT_KMI1].base,
+     			   qdev_get_gpio_in(vms->gic, vms->irqmap[VIRT_KMI1]));
+ 
+-#if 0
++#if 1
+             /* Attach the vext controller */
+             vms->vext = sysbus_create_simple("vext", 0x20000000, NULL);
+ #endif
+-- 
+GitLab
+

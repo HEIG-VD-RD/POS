@@ -1,0 +1,799 @@
+From 14e42d4f8054033cd0a435da7466ec43cd1f980c Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Sun, 17 Nov 2024 18:55:50 +0100
+Subject: [PATCH] Fin du labo8. Vext32 normalement fonctionnel mais le
+ sense-hat-gui ne s ouvre plus
+
+---
+ build.conf                |   2 +-
+ linux/usr/module/access.c | 193 ++++++++++++------
+ linux/usr/src/vextctl.c   | 397 ++++++++++++++++++++++++++++++++------
+ 3 files changed, 480 insertions(+), 112 deletions(-)
+
+diff --git a/build.conf b/build.conf
+index 0d74b258d1..a0276ffa53 100644
+--- a/build.conf
++++ b/build.conf
+@@ -1,2 +1,2 @@
+-PLATFORM := rpi4
++PLATFORM := virt32
+ 
+diff --git a/linux/usr/module/access.c b/linux/usr/module/access.c
+index 6f69cc0173..9cc9130b2d 100644
+--- a/linux/usr/module/access.c
++++ b/linux/usr/module/access.c
+@@ -17,6 +17,7 @@
+ #include <linux/leds.h>
+ #include <asm/io.h>
+ #include <linux/string.h>
++#include <linux/input.h>
+ 
+ #include "rpisense.h"
+ 
+@@ -37,12 +38,32 @@
+ #define SWITCH3 0x3
+ #define SWITCH4 0x4
+ #define SWITCH5 0x5
++#define NUM_SWITCHES 5
+ 
+ #define NBRLED 5
+ 
+ #define VIRT32 "virt32"
+ #define RPI4  "rpi4"
+ 
++
++/** Réponse question sur maj/min
++ * Si on fait ls /dev/input -l on peut voir cette sortie:
++ * crw-rw---- 1 root input 13, 64 Jan  1 00:00 event0
++ * donc un majeur de 13 et un mineur de 64 pour event 0
++ *
++ */
++
++// Array of keys for virt32
++static int keys_virt32[] = { KEY_ENTER, KEY_LEFT, KEY_UP, KEY_RIGHT,  KEY_DOWN };
++// Array of keys for rpi4
++static int keys_rpi4[] = { CENTER, LEFT, UP, RIGHT,  DOWN };
++
++// Structure for the switches
++struct mySwitch {
++	struct input_dev* input;
++	int pressed;
++};
++
+ // Structure for the LEDs
+ struct my_leds
+ {
+@@ -68,55 +89,82 @@ typedef struct priv_data
+ 	struct my_leds leds[NBRLED];
+ 	// Platform type retrieved from the DT
+ 	const char* platform;
++	// Switches
++	struct mySwitch mySwitches;
+ } priv_data_t;
+ 
+ /**
+  * @brief Handler for the IRQ
+  * @param irq The IRQ number
+  * @param dev_id The device ID
+- * @return IRQ_HANDLED if the IRQ was handled, IRQ_NONE otherwise
++ * @return IRQ_HANDLED if the IRQ was handled, IRQ_WAKE_THREAD to wake the thread handler, IRQ_NONE otherwise
+  * Note: There could be concurrency issues since we don't use any locking mechanism
+  */
+ static irqreturn_t irq_handler(int irq, void* dev_id)
+ {
+-	pr_info("(module): Interrupt received\n");
+ 	priv_data_t* priv = (priv_data_t*)dev_id;
+ 
++	// Clear the IRQ by writing to IRQ_CTRL
++	iowrite16(IRQ_CLEAR, priv->irq_ctrl);
++
++	return IRQ_WAKE_THREAD;
++}
++
++/**
++ * @brief Thread handler for the IRQ. Used to handle the switches
++ * @param irq The IRQ number
++ * @param dev_id The device ID
++ * @return IRQ_HANDLED if the IRQ was handled, IRQ_NONE otherwise
++ */
++static irqreturn_t irq_thread_handler(int irq, void* dev_id)
++{
++	priv_data_t* priv = (priv_data_t*)dev_id;
+ 	uint16_t switches = ioread16(priv->switches);
+-	uint16_t leds = ioread16(priv->led_addr);
+-	uint16_t led;
+-	// Toggle the LED corresponding to the switch
+-	switch (switches & SWITCHES_MASK)
+-	{
+-	case SWITCH1:
+-		led = LED0;
+-		break;
+-	case SWITCH2:
+-		led = LED1;
+-		break;
+-	case SWITCH3:
+-		led = LED2;
+-		break;
+-	case SWITCH4:
+-		led = LED3;
+-		break;
+-	case SWITCH5:
+-		led = LED4;
+-		break;
+-	default:
+-		return IRQ_NONE;
++	int pressed_key;
++	int i;
++
++	for (i = 0; i < NUM_SWITCHES; i++) {
++		if (switches == (i + 1)) {
++			pressed_key = keys_virt32[i];
++			break;
++		}
+ 	}
+ 
+-	// Write the value of the switches to the LED
+-	leds ^= led;
+-	iowrite16(leds, priv->led_addr);
+-
+-	// Clear the IRQ by writing to IRQ_CTRL
+-	iowrite16(IRQ_CLEAR, priv->irq_ctrl);
++	// Report the key press
++	input_report_key(priv->mySwitches.input, pressed_key, 1);
++	input_sync(priv->mySwitches.input);
++	// Report the key release
++	input_report_key(priv->mySwitches.input, pressed_key, 0);
++	input_sync(priv->mySwitches.input);
+ 
+ 	return IRQ_HANDLED;
+ }
+ 
++/**
++ * @brief Handler for the joystick for rpi4
++ * @param pdev The platform device
++ * @param key The key pressed
++ * 
++ */
++void joystick_handler(struct platform_device* pdev, int key) {
++	priv_data_t* priv = (struct priv_data*)platform_get_drvdata(pdev);
++	int i;
++	int pressed_key;
++
++	for (i = 0; i < NUM_SWITCHES; i++) {
++		if (key == keys_rpi4[i]) {
++			pressed_key = keys_rpi4[i];
++			break;
++		}
++	}
++
++	input_report_key(priv->mySwitches.input, pressed_key, 1);
++	input_sync(priv->mySwitches.input);
++	
++	input_report_key(priv->mySwitches.input, pressed_key, 0);
++	input_sync(priv->mySwitches.input);
++}
++
+ /**
+  * @brief Set the brightness of the LED through the sysfs interface
+  * @param led_cdev The LED class device
+@@ -127,7 +175,7 @@ void vext_brightness_set(struct led_classdev* led_cdev, enum led_brightness brig
+ 	// We retrieve the led information to get the mask of the led and the priv_data to get the led address
+ 	struct my_leds* led_info = container_of(led_cdev, struct my_leds, led);
+ 	struct platform_device* pdev = container_of(led_cdev->dev->parent, struct platform_device, dev);
+-	struct priv_data* priv = (struct priv_data*)platform_get_drvdata(pdev);
++	priv_data_t* priv = (struct priv_data*)platform_get_drvdata(pdev);
+ 
+ 	// CASE 1: virt32
+ 	if (!strcmp(priv->platform, VIRT32)) {
+@@ -189,15 +237,13 @@ enum led_brightness vext_brightness_get(struct led_classdev* led_cdev)
+  */
+ static int vext_probe(struct platform_device* pdev)
+ {
+-
+ 	priv_data_t* priv_data;
+ 	struct resource* res;
+ 	struct device_node* dev_node;
+ 	int err;
++	int i;
+ 
+-
+-	pr_info("(module): probe\n");
+-	priv_data = kzalloc(sizeof(priv_data_t), GFP_KERNEL);
++	priv_data = devm_kzalloc(&pdev->dev, sizeof(priv_data_t), GFP_KERNEL);
+ 
+ 	if (!priv_data)
+ 	{
+@@ -225,6 +271,18 @@ static int vext_probe(struct platform_device* pdev)
+ 
+ 	pr_info("(module): platform: %s\n", priv_data->platform);
+ 
++
++	//Switch register
++	priv_data->mySwitches.input = devm_input_allocate_device(&pdev->dev);
++	if (!priv_data->mySwitches.input)
++	{
++		pr_err("Error allocating input device\n");
++		return -ENOMEM;
++	}
++
++	priv_data->mySwitches.input->name = "vext:switches";
++	priv_data->mySwitches.input->dev.parent = &pdev->dev;
++
+ 	// CASE 1: virt32
+ 	if (!strcmp(priv_data->platform, VIRT32))
+ 	{
+@@ -238,37 +296,46 @@ static int vext_probe(struct platform_device* pdev)
+ 		priv_data->mem_addr = devm_ioremap_resource(&pdev->dev, res);
+ 		if (IS_ERR(priv_data->mem_addr))
+ 		{
++			pr_err("Error ioremap\n");
+ 			return PTR_ERR(priv_data->mem_addr);
+ 		}
+ 
+ 		priv_data->led_addr = (u16*)priv_data->mem_addr + (LED_OFFSET / 2);
+ 		priv_data->switches = (u16*)priv_data->mem_addr + (SWITCHES_OFFSET / 2);
+-		priv_data->irq_ctrl = (u16)priv_data->mem_addr + (IRQ_CTRL / 2);
++		priv_data->irq_ctrl = (u16*)priv_data->mem_addr + (IRQ_CTRL / 2);
+ 
+ 		//  Retrieve the IRQ number from the DT.
+ 		priv_data->irqNum = platform_get_irq(pdev, 0);
+ 		if (priv_data->irqNum < 0)
+ 		{
++			pr_err("(module): Error getting IRQ number\n");
+ 			return priv_data->irqNum;
+ 		}
+ 
+ 		// Register the interrupt handler associated with the IRQ
+-		err = request_irq(priv_data->irqNum, irq_handler, IRQF_TRIGGER_HIGH, "irq_handler", (void*)priv_data);
++		err = devm_request_threaded_irq(&pdev->dev, priv_data->irqNum, irq_handler,
++			irq_thread_handler, 0, "irq_handler",
++			(void*)priv_data);
++
+ 		if (err != 0)
+ 		{
++			pr_err("(module): Error requesting IRQ\n");
+ 			return err;
+ 		}
+ 
+-		pr_info("(module): virt32 driver\n");
++		for (i = 0; i < NUM_SWITCHES; i++) {
++			input_set_capability(priv_data->mySwitches.input, EV_KEY, keys_virt32[i]);
++		}
++
+ 	}
+ 	// CASE 2 : rpi4
+ 	else if (!strcmp(priv_data->platform, RPI4)) {
+ 
+ 		rpisense_init();
+-		display_led(0, true);
+-		display_led(2, true);
+-		display_led(4, true);
+-		pr_info("(module): rpisense driver\n");
++		for (i = 0; i < NUM_SWITCHES; i++) {
++			input_set_capability(priv_data->mySwitches.input, EV_KEY, keys_rpi4[i]);
++		}
++		rpisense_joystick_handler_register(pdev, joystick_handler);
+ 
+ 	}
+ 	else
+@@ -277,8 +344,8 @@ static int vext_probe(struct platform_device* pdev)
+ 		return -ENODEV;
+ 	}
+ 
++
+ 	// Led register
+-	int i;
+ 	for (i = 0; i < NBRLED; i++)
+ 	{
+ 		priv_data->leds[i].number = i;
+@@ -291,7 +358,7 @@ static int vext_probe(struct platform_device* pdev)
+ 		priv_data->leds[i].led.name = kasprintf(GFP_KERNEL, "vext:led%d", i);
+ 		priv_data->leds[i].led.brightness_set = vext_brightness_set;
+ 		priv_data->leds[i].led.brightness_get = vext_brightness_get;
+-
++		//pr_info("(module): Registering led %d\n", i);
+ 		// Register the LED
+ 		err = led_classdev_register(&pdev->dev, &priv_data->leds[i].led);
+ 		if (err)
+@@ -301,40 +368,51 @@ static int vext_probe(struct platform_device* pdev)
+ 			{
+ 				led_classdev_unregister(&priv_data->leds[i].led);
+ 			}
+-			kfree(priv_data);
+ 			return err;
+ 		}
+ 	}
+-
++	// We register the input device here since we needed to set the capabilities for the switches
++	// Depending on the platform
++	input_register_device(priv_data->mySwitches.input);
+ 	pr_info("(module): vext driver initialized\n");
+-
+-
+-
+ 	return 0;
+ }
+ 
++/**
++ * @brief Remove function for the platform driver
++ * @param pdev The platform device
++ * @return 0 if the remove was successful, an error code otherwise
++ */
+ static int vext_remove(struct platform_device* pdev)
+ {
+ 	priv_data_t* priv_data = platform_get_drvdata(pdev);
+ 
+-
++	// I could use dev_ to register the leds but 
++	// apparently there are issues with this function
++	// I read online but not sure so I leave it that way
+ 	int i;
+ 	for (i = 0; i < NBRLED; i++)
+ 	{
+ 		led_classdev_unregister(&priv_data->leds[i].led);
+ 	}
++	pr_info("Led unregistered");
++
++	// No longer necessary since I use devm_
++	/* input_unregister_device(priv_data->mySwitches.input);*/
++
++
+ 	// CASE 1: virt32
+ 	if (!strcmp(priv_data->platform, VIRT32)) {
+ 		iowrite16(LED_OFF, priv_data->led_addr);
+-		kfree(platform_get_drvdata(pdev));
+-		free_irq(priv_data->irqNum, (void*)priv_data);
+-		pr_info("(module): virt32 driver removed, LED OFF\n");
++		//No longer necessary since I use devm_
++		//free_irq(priv_data->irqNum, (void*)priv_data);
++		pr_info("(module): virt32 driver removed\n");
+ 	}
+ 	// CASE 2: rpi4
+ 	else if (!strcmp(priv_data->platform, RPI4)) {
+-		display_led(0, false);
+-		display_led(2, false);
+-		display_led(4, false);
++		for (i = 0; i < NBRLED; i++) {
++			display_led(i, false);
++		}
+ 		pr_info("(module): rpisense driver removed\n");
+ 	}
+ 	else {
+@@ -342,6 +420,9 @@ static int vext_remove(struct platform_device* pdev)
+ 		return -ENODEV;
+ 	}
+ 
++	//No longer necessary since I use devm_
++	//kfree(priv_data);
++
+ 	return 0;
+ }
+ 
+diff --git a/linux/usr/src/vextctl.c b/linux/usr/src/vextctl.c
+index 02a0afac0c..dcf0ec5350 100644
+--- a/linux/usr/src/vextctl.c
++++ b/linux/usr/src/vextctl.c
+@@ -1,78 +1,365 @@
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+-#include <stdlib.h>
++#include <linux/input.h>
+ #include <string.h>
++#include <stdbool.h>
++#include <time.h>
+ 
+ #define LED_PATH "/sys/class/leds/"
+-#define HORIZONTAL_LEDS {"vext:led1", "vext:led0", "vext:led3"}
+-#define VERTICAL_LEDS {"vext:led0", "vext:led2", "vext:led4"}
+-#define DELAY 500000 // 500 ms
++#define NUM_LEDS 5
++#define NUM_KEYS 5
++#define END_OF_GAME 20
++#define LED_CENTRAL 0
++
++//Raspberry value to match the module
++#define UP      0x04
++#define DOWN    0x01
++#define RIGHT   0x02
++#define LEFT    0x10
++#define CENTER  0x08
++
++// State of the LED
++typedef enum { OFF = 0, ON } state_t;
++
++// Array of keys for virt32
++static int keys_virt32[] = { KEY_ENTER, KEY_LEFT, KEY_UP, KEY_RIGHT,  KEY_DOWN };
++// Array of keys for rpi4
++static int keys_rpi4[] = { CENTER, LEFT, UP, RIGHT,  DOWN };
++// Array of LED names for the sysfs interface
++const char* leds[] = { "vext:led0", "vext:led1", "vext:led2", "vext:led3", "vext:led4" };
++
++int platform;
+ 
+ /**
+  * @brief Set the state of an LED
+- * @param led_name The name of the LED
++ * @param LED_number The name of the LED
+  * @param state The state to set (0 or 1)
+  */
+-void set_led_state(const char *led_name, int state)
++int set_led_state(int led_number, state_t state)
+ {
+-	char led_brightness_path[256];
+-	// Create the path to the LED brightness file
+-	snprintf(led_brightness_path, sizeof(led_brightness_path), "%s%s/brightness", LED_PATH, led_name);
+-
+-	int fd = open(led_brightness_path, O_WRONLY);
+-	if (fd < 0)
+-	{
+-		perror("Error opening LED brightness");
+-		exit(EXIT_FAILURE);
+-	}
+-
+-	// Convert state to string ("0" or "1") and write to LED brightness
+-	char state_str[2];
+-	snprintf(state_str, sizeof(state_str), "%d", state);
+-
+-	// Write state to the LED and close the file
+-	lseek(fd, 0, SEEK_SET);
+-	if (write(fd, state_str, strlen(state_str)) < 0)
+-	{
+-		perror("Error writing LED state");
+-		close(fd);
+-		exit(EXIT_FAILURE);
+-	}
+-	close(fd);
++    if (led_number < 0 || led_number >= NUM_LEDS)
++    {
++        printf("Invalid LED number. It should be a number between [0:4]\n");
++        return -1;
++    }
++
++
++    char led_brightness_path[256];
++    // Create the path to the LED brightness file
++    snprintf(led_brightness_path, sizeof(led_brightness_path), "%s%s/brightness", LED_PATH, leds[led_number]);
++
++    int fd = open(led_brightness_path, O_WRONLY);
++    if (fd < 0)
++    {
++        perror("Error opening LED brightness");
++        return -1;
++    }
++
++    // Convert state to string ("0" or "1") and write to LED brightness
++    char state_str[2];
++    snprintf(state_str, sizeof(state_str), "%d", state);
++
++    // Write state to the LED and close the file
++    lseek(fd, 0, SEEK_SET);
++    if (write(fd, state_str, strlen(state_str)) < 0)
++    {
++        perror("Error writing LED state");
++        close(fd);
++        return -1;
++    }
++    close(fd);
++    return 0;
++}
++
++/*
++ * @brief Set the state of all LEDs
++ * @param state The state to set (0 or 1)
++*/
++void set_all_leds(state_t state) {
++
++    for (int i = 0; i < NUM_LEDS; i++) {
++        set_led_state(i, state);
++    }
+ }
+ 
+ /**
+- * @brief Toggle the state of a set of LEDs
+- * @param leds_on The names of the LEDs to turn on
+- * @param leds_off The names of the LEDs to turn off
+- * @param count The number of LEDs to toggle
++ * @brief Read the input event and ignore release events
+  */
+-void toggle_leds(const char **leds_on, const char **leds_off, int count)
+-{
+-	for (int i = 0; i < count; i++)
+-	{
+-		set_led_state(leds_off[i], 0);
+-	}
+-	for (int i = 0; i < count; i++)
+-	{
+-		set_led_state(leds_on[i], 1);
+-	}
++int process_switch(int fd, struct input_event* ev) {
++    int n;
++    do {
++        n = read(fd, ev, sizeof(struct input_event));
++        if (n == (ssize_t)-1) {
++            return -1;
++        }
++    } while (ev->type != EV_KEY || ev->value != 1);  // Ignore release events
++    return 0;
+ }
+ 
+-int main()
++/**
++ * @brief Get the value of the switch
++ * @param ev_code The code of the event
++ * @return The corresponding value for the switch depending on the platform
++ */
++int get_switch_value(int ev_code) {
++    int i;
++
++    if (platform == 0) {
++        for (i = 0; i < (sizeof(keys_virt32) / sizeof(int)); i++) {
++            if (ev_code == keys_virt32[i]) {
++                return i;
++            }
++            else {
++                printf("virt32 Not a valid value \n");
++            }
++        }
++    }
++    else if (platform == 1) {
++        for (i = 0; i < (sizeof(keys_rpi4) / sizeof(int)); i++) {
++            if (ev_code == keys_rpi4[i]) {
++                return i;
++            }
++            else {
++                printf("rpi Not a valid value \n");
++            }
++        }
++    }
++
++    return -1;
++}
++
++/**
++ * @brief Generate a random number between min and max
++ * @param min The minimum value
++ * @param max The maximum value
++ * @return The random number
++ */
++int random_range(int min, int max) {
++    return rand() % (max - min + 1) + min;
++}
++
++/**
++ * @brief Blink the LEDs a certain number of times
++ * @param count The number of times to blink
++ */
++void blink_led(int count)
+ {
+-	const char *horizontal_leds[] = HORIZONTAL_LEDS;
+-	const char *vertical_leds[] = VERTICAL_LEDS;
++    int i;
++    for (i = 0; i < count; i++) {
++        set_all_leds(ON);
++        usleep(700000);
++        set_all_leds(OFF);
++    }
++}
++/**
++ * @brief Check the platform
++ * @return 1 if the platform is Raspberry Pi, 0 if it is virt32, -1 otherwise
++ */
++int check_platform() {
++    FILE* fp = fopen("/proc/device-tree/compatible", "r");
++    if (!fp) {
++        perror("Erreur d'ouverture du fichier compatible");
++        perror("Error opening compatible file");
++        return -1;
++    }
++
++    char buffer[256];
++    fread(buffer, sizeof(char), sizeof(buffer) - 1, fp);
++    fclose(fp);
++
++    if (strstr(buffer, "raspberrypi")) {
++        printf("Plateform : Raspberry Pi\n");
++        return 1;
++    }
++    else if (strstr(buffer, "linux")) {
++        printf("Plateform : virt32\n");
++        return 0;
++    }
++    else {
++        printf("Unknown platform\n");
++        return -1;
++    }
++}
++
++/**
++ * Note: Depending on the platform, the keys are different and the file to read the event
++ * might be different as well. That's why we need to check the platform first.
++ * In my case event0 is virt32 and event1 works for Raspberry Pi (but not event0)
++ */
++int main(int argc, char* argv[]) {
++    char device[20] = "/dev/input/event";
++    bool begin = true;
++    bool lost = false;
++
++    platform = check_platform();
++    if (platform == 1) {
++        strcat(device, "1");
++    }
++    else if (platform == 0) {
++        strcat(device, "0");
++    }
++    printf("Device is : %s\n", device);
++
++
++    set_all_leds(ON);
++
++    // Open the event file
++    int fd = open(device, O_RDONLY);
++    if (fd == -1) {
++        perror("Error opening event file");
++        return EXIT_FAILURE;
++    }
++
++    struct input_event ev;
++
++    printf("To start the game push any buttons\n");
++    int round = 0;
++    int number_to_play = 2;
++
++    // Memory allocation variable for the values
++    int* simon_values;
++    int* user_values;
++
++    srand(time(NULL));
++
++
++    // Game loop
++    while (1) {
++        int i;
++
++        // Begin the game
++        if (begin) {
++
++            if (process_switch(fd, &ev) < 0) {
++                perror("Error reading event");
++                goto error1;
++            }
++
++            printf("The game is about to start \n");
++            set_all_leds(OFF);
++            sleep(2);
++            begin = false;
++        }
++        printf("Round num: %d/%d\n", round, END_OF_GAME);
++
++        // Increase the number of values to play every 5 rounds
++        // In this case the game start with 3 values to find since 0 % 5 = 0
++        number_to_play = !(round % 5) ? (number_to_play + 1) : number_to_play;
++
++        // Game logic
++
++        // Memory allocation for the values to remember
++        simon_values = (int*)calloc(number_to_play, sizeof(int));
++        if (simon_values == NULL) {
++            perror("Error allocating memory for simon \n");
++            goto error1;
++        }
++        // Memory allocation the user will input
++        user_values = (int*)calloc(number_to_play, sizeof(int));
++        if (user_values == NULL) {
++            perror("Error allocating memory for simon \n");
++            goto error2;
++        }
++        // Generate random values
++        for (i = 0; i < number_to_play; i++) {
++            simon_values[i] = random_range(1, 4);
++        }
++        // Display the values
++        for (i = 0; i < number_to_play; i++) {
++            if (set_led_state(simon_values[i], ON) < 0) {
++                goto error3;
++            }
++            usleep(700000);
++            if (set_led_state(simon_values[i], OFF) < 0) {
++                goto error3;
++            }
++            usleep(700000);
++        }
++        // Indicate the user to play
++        set_led_state(LED_CENTRAL, ON);
++
++        // Read the user input
++        for (i = 0; i < number_to_play; i++) {
++            printf("Read user \n");
++            if (process_switch(fd, &ev) < 0) {
++                perror("Erreur lors de la lecture de l'événement");
++                goto error3;
++            }
++            user_values[i] = get_switch_value(ev.code);
++            if (set_led_state(simon_values[i], ON) < 0) {
++                goto error3;
++            }
++            usleep(100000);
++            if (set_led_state(simon_values[i], OFF) < 0) {
++                goto error3;
++            }
++
++            if (user_values[i] != simon_values[i]) {
++                sleep(1);
++                lost = true;
++                break;
++            }
++        }
++
++        sleep(1);
++
++        // Free the memory
++        free(simon_values);
++        free(user_values);
++        set_led_state(LED_CENTRAL, OFF);
++        if (lost) {
++            printf("You lost %d/%d\n", round, END_OF_GAME);
++            // Blink the LEDs to indicate the end of the game and the number of rounds played
++            blink_led(round);
++            break;
++        }
++
++        round++;
++
++        // End of the game
++        if (round == END_OF_GAME) {
++            printf("Congratulation you won the game, to play again press UP, to exit press DOWN\n");
++            while (1) {
++                if (process_switch(fd, &ev) < 0) {
++                    perror("Error reading event");
++                    goto error1;
++                }
++
++                if (!(ev.code == KEY_UP || ev.code == KEY_DOWN)) {
++                    printf("Waiting for the right input\n");
++                    continue;
++                }
++
++                break;
++            }
++            // Restart the game
++            if (ev.code == KEY_UP) {
++                begin = true;
++                round = 0;
++                set_all_leds(ON);
++            }
++            // Exit the game
++            else if (ev.code == KEY_DOWN) {
++                break;
++            }
++        }
++    }
++    printf("End of game \n");
+ 
+-	while (1)
+-	{
+-		toggle_leds(horizontal_leds, vertical_leds, 3);
+-		usleep(DELAY);
++    set_all_leds(OFF);
+ 
+-		toggle_leds(vertical_leds, horizontal_leds, 3);
+-		usleep(DELAY);
+-	}
++    // Close the event file
++    close(fd);
++    return EXIT_SUCCESS;
+ 
+-	return 0;
++    // Error handling
++error3:
++    free(user_values);
++error2:
++    free(simon_values);
++error1:
++    close(fd);
++    return EXIT_FAILURE;
+ }
+-- 
+GitLab
+

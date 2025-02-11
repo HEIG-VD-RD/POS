@@ -1,0 +1,424 @@
+From 8added0a0c09f392608dea87e303c9349ffc509d Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Tue, 12 Nov 2024 11:22:03 +0100
+Subject: [PATCH] Fin du labo7
+
+---
+ .../arch/arm/boot/dts/bcm2711-rpi-4-b.dts     |   5 +-
+ linux/linux/arch/arm/boot/dts/virt32.dts      |   5 +-
+ linux/usr/module/access.c                     | 239 +++++++++++-------
+ 3 files changed, 151 insertions(+), 98 deletions(-)
+
+diff --git a/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts b/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
+index 0286cd63e3..c36b7f22ea 100644
+--- a/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
++++ b/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
+@@ -29,8 +29,9 @@ memory@0 {
+ 		reg = <0 0x0 0x20000000>;
+ 	};
+ 
+-	virt32@20000000 {
+-		compatible = "virt32,vext";
++	vext {
++		compatible = "vext,vext";
++		platform_type = "rpi4";
+ 		/*reg = <0x0 0x20000000 0x0 0x1000>;*/
+ 	};
+ 
+diff --git a/linux/linux/arch/arm/boot/dts/virt32.dts b/linux/linux/arch/arm/boot/dts/virt32.dts
+index 81a12f4306..b2590d7f79 100644
+--- a/linux/linux/arch/arm/boot/dts/virt32.dts
++++ b/linux/linux/arch/arm/boot/dts/virt32.dts
+@@ -6,10 +6,11 @@ / {
+ 	#address-cells = <0x02>;
+ 	compatible = "linux,dummy-virt";
+ 
+-	virt32@20000000 {
+-		compatible = "virt32,vext";
++	vext@20000000 {
++		compatible = "vext,vext";
+ 		reg = <0x0 0x20000000 0x0 0x1000>;
+ 		interrupts = <0 50 4>; // SPI type, interrupt number 50, active high level-sensitive
++		platform_type = "virt32";
+ 	};
+ 	psci {
+ 		migrate = <0xc4000005>;
+diff --git a/linux/usr/module/access.c b/linux/usr/module/access.c
+index 3b03083b2b..6f69cc0173 100644
+--- a/linux/usr/module/access.c
++++ b/linux/usr/module/access.c
+@@ -16,12 +16,11 @@
+ #include <linux/of.h>
+ #include <linux/leds.h>
+ #include <asm/io.h>
++#include <linux/string.h>
+ 
+ #include "rpisense.h"
+ 
+-#define VIRT32 1
+-
+-// Offsets Registers
++ // Offsets Registers
+ #define LED_OFFSET 0x3a
+ #define SWITCHES_OFFSET 0x12
+ #define IRQ_CTRL 0x18
+@@ -41,6 +40,9 @@
+ 
+ #define NBRLED 5
+ 
++#define VIRT32 "virt32"
++#define RPI4  "rpi4"
++
+ // Structure for the LEDs
+ struct my_leds
+ {
+@@ -53,18 +55,19 @@ struct my_leds
+ typedef struct priv_data
+ {
+ 	// Memory addresses for vext
+-	void *mem_addr;
++	void* mem_addr;
+ 	// Led address
+-	void *led_addr;
++	void* led_addr;
+ 	// Switches address
+-	void *switches;
++	void* switches;
+ 	// IRQ control address
+-	void *irq_ctrl;
++	void* irq_ctrl;
+ 	// IRQ number
+ 	int irqNum;
+ 	// led
+ 	struct my_leds leds[NBRLED];
+-	// struct led_classdev led;
++	// Platform type retrieved from the DT
++	const char* platform;
+ } priv_data_t;
+ 
+ /**
+@@ -74,10 +77,10 @@ typedef struct priv_data
+  * @return IRQ_HANDLED if the IRQ was handled, IRQ_NONE otherwise
+  * Note: There could be concurrency issues since we don't use any locking mechanism
+  */
+-static irqreturn_t irq_handler(int irq, void *dev_id)
++static irqreturn_t irq_handler(int irq, void* dev_id)
+ {
+ 	pr_info("(module): Interrupt received\n");
+-	priv_data_t *priv = (priv_data_t *)dev_id;
++	priv_data_t* priv = (priv_data_t*)dev_id;
+ 
+ 	uint16_t switches = ioread16(priv->switches);
+ 	uint16_t leds = ioread16(priv->led_addr);
+@@ -119,25 +122,37 @@ static irqreturn_t irq_handler(int irq, void *dev_id)
+  * @param led_cdev The LED class device
+  * @param brightness The brightness to set
+  */
+-void vext_brightness_set(struct led_classdev *led_cdev, enum led_brightness brightness)
++void vext_brightness_set(struct led_classdev* led_cdev, enum led_brightness brightness)
+ {
+ 	// We retrieve the led information to get the mask of the led and the priv_data to get the led address
+-	struct my_leds *led_info = container_of(led_cdev, struct my_leds, led);
+-	struct priv_data *priv = container_of(led_info - led_info->number, struct priv_data, leds[0]);
++	struct my_leds* led_info = container_of(led_cdev, struct my_leds, led);
++	struct platform_device* pdev = container_of(led_cdev->dev->parent, struct platform_device, dev);
++	struct priv_data* priv = (struct priv_data*)platform_get_drvdata(pdev);
+ 
+-	u16 led_state = ioread16(priv->led_addr);
++	// CASE 1: virt32
++	if (!strcmp(priv->platform, VIRT32)) {
++		u16 led_state = ioread16(priv->led_addr);
+ 
+-	// Set the LED to the desired brightness
+-	if (brightness > 0)
+-	{
+-		led_state |= led_info->mask;
+-	}
+-	else
+-	{
+-		led_state &= ~led_info->mask;
++		// Set the LED to the desired brightness
++		if (brightness > 0)
++		{
++			led_state |= led_info->mask;
++		}
++		else
++		{
++			led_state &= ~led_info->mask;
++		}
++
++		iowrite16(led_state, priv->led_addr);
+ 	}
++	// CASE 2: rpi4
++	else if (!strcmp(priv->platform, RPI4)) {
++
++		display_led(led_info->number, brightness);
++		// We update the brightness of the led
++		led_info->led.brightness = brightness;
+ 
+-	iowrite16(led_state, priv->led_addr);
++	}
+ }
+ 
+ /**
+@@ -145,15 +160,26 @@ void vext_brightness_set(struct led_classdev *led_cdev, enum led_brightness brig
+  * @param led_cdev The LED class device
+  * @return The brightness of the LED
+  */
+-enum led_brightness vext_brightness_get(struct led_classdev *led_cdev)
++enum led_brightness vext_brightness_get(struct led_classdev* led_cdev)
+ {
+ 	// We retrieve the led information to get the mask of the led and the priv_data to get the led address
+-	struct my_leds *led_info = container_of(led_cdev, struct my_leds, led);
+-	struct priv_data *priv = container_of(led_info - led_info->number, struct priv_data, leds[0]);
++	struct my_leds* led_info = container_of(led_cdev, struct my_leds, led);
++	struct platform_device* pdev = container_of(led_cdev->dev->parent, struct platform_device, dev);
++	struct priv_data* priv = (struct priv_data*)platform_get_drvdata(pdev);
++
++	// CASE 1: virt32
++	if (!strcmp(priv->platform, VIRT32)) {
+ 
+-	uint16_t led_status = ioread16(priv->led_addr);
++		uint16_t led_status = ioread16(priv->led_addr);
+ 
+-	return (led_status & led_info->mask) ? LED_ON : LED_OFF;
++		return (led_status & led_info->mask) ? LED_ON : LED_OFF;
++	}
++	// CASE 2: rpi4
++	else if (!strcmp(priv->platform, RPI4)) {
++		return led_info->led.brightness;
++	}
++
++	return -1;
+ }
+ 
+ /**
+@@ -161,49 +187,94 @@ enum led_brightness vext_brightness_get(struct led_classdev *led_cdev)
+  * @param pdev The platform device
+  * @return 0 if the probe was successful, an error code otherwise
+  */
+-static int vext_probe(struct platform_device *pdev)
++static int vext_probe(struct platform_device* pdev)
+ {
+-#if VIRT32
+-	priv_data_t *priv_data;
+-	struct resource *res;
++
++	priv_data_t* priv_data;
++	struct resource* res;
++	struct device_node* dev_node;
+ 	int err;
+ 
++
++	pr_info("(module): probe\n");
+ 	priv_data = kzalloc(sizeof(priv_data_t), GFP_KERNEL);
+ 
+ 	if (!priv_data)
+ 	{
++		pr_info("(module): Error allocating memory\n");
+ 		return -ENOMEM;
+ 	}
+ 
+ 	platform_set_drvdata(pdev, priv_data);
+-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+-	if (!res)
++	pr_info("(module): platform set drvdata\n");
++
++	// Retrieve the platform type from the DT
++	dev_node = of_find_node_by_name(NULL, "vext");
++	if (!dev_node)
+ 	{
++		pr_err("(module): Error getting device node\n");
+ 		return -ENODEV;
+ 	}
+ 
+-	priv_data->mem_addr = devm_ioremap_resource(&pdev->dev, res);
+-	if (IS_ERR(priv_data->mem_addr))
++	err = of_property_read_string(dev_node, "platform_type", &priv_data->platform);
++	if (err)
+ 	{
+-		return PTR_ERR(priv_data->mem_addr);
++		pr_err("(module): Error reading platform type\n");
++		return err;
+ 	}
+ 
+-	priv_data->led_addr = priv_data->mem_addr + LED_OFFSET;
+-	priv_data->switches = priv_data->mem_addr + SWITCHES_OFFSET;
+-	priv_data->irq_ctrl = priv_data->mem_addr + IRQ_CTRL;
++	pr_info("(module): platform: %s\n", priv_data->platform);
+ 
+-	//  Retrieve the IRQ number from the DT.
+-	priv_data->irqNum = platform_get_irq(pdev, 0);
+-	if (priv_data->irqNum < 0)
++	// CASE 1: virt32
++	if (!strcmp(priv_data->platform, VIRT32))
+ 	{
+-		return priv_data->irqNum;
++		res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++		if (!res)
++		{
++			pr_info("(module): Error getting platform resource\n");
++			return -ENODEV;
++		}
++
++		priv_data->mem_addr = devm_ioremap_resource(&pdev->dev, res);
++		if (IS_ERR(priv_data->mem_addr))
++		{
++			return PTR_ERR(priv_data->mem_addr);
++		}
++
++		priv_data->led_addr = (u16*)priv_data->mem_addr + (LED_OFFSET / 2);
++		priv_data->switches = (u16*)priv_data->mem_addr + (SWITCHES_OFFSET / 2);
++		priv_data->irq_ctrl = (u16)priv_data->mem_addr + (IRQ_CTRL / 2);
++
++		//  Retrieve the IRQ number from the DT.
++		priv_data->irqNum = platform_get_irq(pdev, 0);
++		if (priv_data->irqNum < 0)
++		{
++			return priv_data->irqNum;
++		}
++
++		// Register the interrupt handler associated with the IRQ
++		err = request_irq(priv_data->irqNum, irq_handler, IRQF_TRIGGER_HIGH, "irq_handler", (void*)priv_data);
++		if (err != 0)
++		{
++			return err;
++		}
++
++		pr_info("(module): virt32 driver\n");
+ 	}
++	// CASE 2 : rpi4
++	else if (!strcmp(priv_data->platform, RPI4)) {
+ 
+-	// Register the interrupt handler associated with the IRQ
+-	err = request_irq(priv_data->irqNum, irq_handler, IRQF_TRIGGER_HIGH, "irq_handler", (void *)priv_data);
+-	if (err != 0)
++		rpisense_init();
++		display_led(0, true);
++		display_led(2, true);
++		display_led(4, true);
++		pr_info("(module): rpisense driver\n");
++
++	}
++	else
+ 	{
+-		return err;
++		pr_err("(module): platform not supported\n");
++		return -ENODEV;
+ 	}
+ 
+ 	// Led register
+@@ -212,8 +283,10 @@ static int vext_probe(struct platform_device *pdev)
+ 	{
+ 		priv_data->leds[i].number = i;
+ 		// We set the mask for each LED
++		// Used only with the virt32 platform and not the rpisense
+ 		priv_data->leds[i].mask = 1 << i;
+ 
++
+ 		// We set the name of the LED, the brightness set and get functions
+ 		priv_data->leds[i].led.name = kasprintf(GFP_KERNEL, "vext:led%d", i);
+ 		priv_data->leds[i].led.brightness_set = vext_brightness_set;
+@@ -233,36 +306,41 @@ static int vext_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
+-	// iowrite16(LED_ON, priv_data->led_addr);
+-	pr_info("(module): vext driver initialized, LED ON yeayy\n");
++	pr_info("(module): vext driver initialized\n");
++
+ 
+-#else
+-	rpisense_init();
+-	display_led(0, true);
+-	display_led(2, true);
+-	display_led(4, true);
+-#endif
+ 
+ 	return 0;
+ }
+ 
+-static int vext_remove(struct platform_device *pdev)
++static int vext_remove(struct platform_device* pdev)
+ {
+-	priv_data_t *priv_data = platform_get_drvdata(pdev);
++	priv_data_t* priv_data = platform_get_drvdata(pdev);
++
+ 
+-#if VIRT32
+ 	int i;
+ 	for (i = 0; i < NBRLED; i++)
+ 	{
+ 		led_classdev_unregister(&priv_data->leds[i].led);
+ 	}
+-	iowrite16(LED_OFF, priv_data->led_addr);
+-	kfree(platform_get_drvdata(pdev));
+-	free_irq(priv_data->irqNum, (void *)priv_data);
+-	pr_info("(module): vext driver removed, LED OFF\n");
+-#else
+-	pr_info("(module): rpisense driver removed\n");
+-#endif
++	// CASE 1: virt32
++	if (!strcmp(priv_data->platform, VIRT32)) {
++		iowrite16(LED_OFF, priv_data->led_addr);
++		kfree(platform_get_drvdata(pdev));
++		free_irq(priv_data->irqNum, (void*)priv_data);
++		pr_info("(module): virt32 driver removed, LED OFF\n");
++	}
++	// CASE 2: rpi4
++	else if (!strcmp(priv_data->platform, RPI4)) {
++		display_led(0, false);
++		display_led(2, false);
++		display_led(4, false);
++		pr_info("(module): rpisense driver removed\n");
++	}
++	else {
++		pr_err("(module): platform not supported\n");
++		return -ENODEV;
++	}
+ 
+ 	return 0;
+ }
+@@ -271,7 +349,7 @@ MODULE_INFO(intree, "Y");
+ MODULE_LICENSE("GPL");
+ 
+ static const struct of_device_id vext_driver_id[] = {
+-	{.compatible = "virt32,vext"},
++	{.compatible = "vext,vext"},
+ 	{/* END */},
+ };
+ 
+@@ -288,30 +366,3 @@ static struct platform_driver vext_driver = {
+ };
+ 
+ module_platform_driver(vext_driver);
+-
+-/*
+-
+-static int access_init(void) {
+-
+-	printk("access: small driver for accessing I/O ...\n");
+-
+-	// Access the I/O
+-	led_addr = ioremap(VEXT_BASE + LED_OFFSET, 2);
+-
+-	// Write to the LEDS to turn them on
+-	iowrite16(LED_ON, led_addr);
+-
+-	return 0;
+-}
+-
+-
+-static void access_exit(void) {
+-
+-	printk("access: bye bye!\n");
+-
+-	// Turn off the leds
+-	iowrite16(LED_OFF, led_addr);
+-}
+-
+-module_init(access_init);
+-module_exit(access_exit); */
+-- 
+GitLab
+

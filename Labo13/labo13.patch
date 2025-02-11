@@ -1,0 +1,244 @@
+From 76ed3eca0a00de991de21c6167628f5a9b710616 Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Sat, 28 Dec 2024 14:22:37 +0100
+Subject: [PATCH] Fin de labo 13
+
+---
+ so3/so3/.config            | 80 ++++++++++++++++++++++++++++++++++++++
+ so3/so3/arch/arm32/head.S  | 14 ++++++-
+ so3/so3/arch/arm32/setup.c |  5 +++
+ so3/so3/dts/virt32.dts     |  4 ++
+ target/virt32.its          | 39 +++++++++++++++++--
+ 5 files changed, 136 insertions(+), 6 deletions(-)
+ create mode 100644 so3/so3/.config
+
+diff --git a/so3/so3/.config b/so3/so3/.config
+new file mode 100644
+index 0000000000..b93224e979
+--- /dev/null
++++ b/so3/so3/.config
+@@ -0,0 +1,80 @@
++#
++# Automatically generated make config: don't edit
++# SO3 Polymorphic OS Configuration
++#
++CONFIG_ARCH_ARM32=y
++# CONFIG_ARCH_ARM64 is not set
++CONFIG_SO3VIRT=y
++CONFIG_ARCH="arm32"
++CONFIG_CROSS_COMPILE="arm-none-eabi-"
++# CONFIG_ARM_TRUSTZONE is not set
++
++#
++# Platform
++#
++CONFIG_KERNEL_VADDR=0xc0000000
++CONFIG_VIRT32=y
++# CONFIG_RPI4 is not set
++# CONFIG_THREAD_ENV is not set
++CONFIG_PROC_ENV=y
++
++#
++# Kernel & CPU features
++#
++# CONFIG_SMP is not set
++CONFIG_NR_CPUS=1
++CONFIG_HZ=100
++CONFIG_SCHED_FLIP_SCHEDFREQ=30
++
++#
++# SO3 Scheduling configuration
++#
++CONFIG_SCHED_RR=y
++# CONFIG_SCHED_PRIO is not set
++CONFIG_SCHED_FREQ_PREEMPTION=y
++
++#
++# Drivers
++#
++CONFIG_UART=y
++CONFIG_IO_MAPPING_BASE=0xe0000000
++# CONFIG_I2C is not set
++# CONFIG_NET is not set
++CONFIG_FB=y
++CONFIG_INPUT=y
++# CONFIG_NS16550 is not set
++CONFIG_PL011_UART=y
++CONFIG_UART_LL_PADDR=0x9000000
++# CONFIG_MMC is not set
++CONFIG_RAMDEV=y
++# CONFIG_SP804 is not set
++CONFIG_ARM_TIMER=y
++CONFIG_GIC=y
++CONFIG_PL111_CLCD=y
++# CONFIG_QEMU_RAMFB is not set
++CONFIG_PL050_KMI=y
++
++#
++# SO3 Applications
++#
++# CONFIG_APP_SAMPLE is not set
++
++#
++# Filesystems
++#
++CONFIG_FS_FAT=y
++# CONFIG_ROOTFS_NONE is not set
++# CONFIG_ROOTFS_MMC is not set
++CONFIG_ROOTFS_RAMDEV=y
++
++#
++# IPC
++#
++CONFIG_IPC_SIGNAL=y
++CONFIG_IPC_PIPE=y
++CONFIG_HEAP_SIZE=32
++# CONFIG_RTOS is not set
++# CONFIG_AVZ is not set
++# CONFIG_SOO is not set
++CONFIG_MMU=y
++CONFIG_DEBUG_PRINTK=y
+diff --git a/so3/so3/arch/arm32/head.S b/so3/so3/arch/arm32/head.S
+index 24d9dc7c29..376045bddb 100644
+--- a/so3/so3/arch/arm32/head.S
++++ b/so3/so3/arch/arm32/head.S
+@@ -23,7 +23,7 @@
+ 
+ #include <generated/autoconf.h>
+ 
+-#include <asm/processor.h>
++#include <asm/processor.h> 
+ #include <asm/mmu.h>
+ 
+ #include <thread.h>
+@@ -74,6 +74,15 @@ __start:
+ 
+ 	/* TODO POS: share avz_shared */
+ 
++#ifdef CONFIG_SO3VIRT
++
++  ldr r10, =avz_shared
++  str r12, [r10]
++
++  mov r8, #0
++  
++#else
++
+   @ Make sure we start in SVC
+   safe_svcmode_maskall r9
+ 
+@@ -96,7 +105,8 @@ cont:
+   ldr 	r1, =__vectors
+   add	r1, r1, r8
+   mcr 	p15, 0, r1, c12, c0, 0		@ vector table
+-
++  
++#endif
+ 
+   @ Prepare to clear bss and zero fp
+   ldr	r6, =__bss_start
+diff --git a/so3/so3/arch/arm32/setup.c b/so3/so3/arch/arm32/setup.c
+index 63d96a1e9d..56a7805b92 100644
+--- a/so3/so3/arch/arm32/setup.c
++++ b/so3/so3/arch/arm32/setup.c
+@@ -126,7 +126,12 @@ void cpu_init(void) {
+ void setup_arch(void) {
+ 
+ 	/* TODO POS: get avz_share infos */
++#ifdef CONFIG_SO3VIRT
++
++	__printch = avz_shared->printch;
++	HYPERVISOR_hypercall_addr = (volatile uint32_t *)avz_shared->hypercall_vaddr;
+ 
++#endif
+ 	/* Original boot CPU identification to prevent undesired activities on another CPU . */
+ 	origin_cpu = smp_processor_id();
+ 
+diff --git a/so3/so3/dts/virt32.dts b/so3/so3/dts/virt32.dts
+index f6e88f273e..8aebab6c70 100644
+--- a/so3/so3/dts/virt32.dts
++++ b/so3/so3/dts/virt32.dts
+@@ -124,6 +124,10 @@
+ 		compatible = "arm,mydev";
+ 		status = "ok";
+ 	};
++
++	agency {
++		domain-size = <0x10000000>;
++	};
+ 	
+ 	vext {
+ 		compatible = "arm,virt32,vext";
+diff --git a/target/virt32.its b/target/virt32.its
+index 30d45b4c5a..dc120b55c3 100644
+--- a/target/virt32.its
++++ b/target/virt32.its
+@@ -54,10 +54,10 @@
+ 			load = <0x50c00000>;
+ 		};
+ 
+-		linux_so3 {
++		so3 {
+ 			description = "SO3 kernel";
+ 			data = /incbin/("../so3/so3/so3.bin");
+-			type = "kernel";
++			type = "avz";
+ 			arch = "arm";
+ 			os = "linux";
+ 			compression = "none";
+@@ -84,9 +84,31 @@
+ 			load = <0x44c00000>;
+ 		};
+ 
++
++      avz {
++            description = "AVZ Hypervisor (32-bit Polymorphic SO3)";
++            data = /incbin/("../avz/so3.bin");
++            type = "kernel";
++            arch = "arm";
++            os = "linux";
++            compression = "none";
++            load = <0x40008000>;
++            entry = <0x40008000>;
++        };
++
++        avz_dt {
++            description = "Flattened Device Tree blob for AVZ";
++            data = /incbin/("../avz/dts/virt32_avz.dtb");
++            type = "avz_dt";
++            arch = "arm";
++            compression = "none";
++            load = <0x40b00000>;
++        };
++
++
+ 	};
+ 	configurations {
+-		default = "so3";
++		default = "avz_so3";
+ 	
+ 		linux {
+ 			description = "SO3 kernel image including device tree";
+@@ -97,9 +119,18 @@
+ 	
+ 		so3 {
+ 			description = "SO3 kernel image with device tree and rootfs";
+-			kernel = "linux_so3";
++			kernel = "so3";
+ 			fdt = "fdt_so3";
+ 			ramdisk = "rootfs_so3";
+ 		};
++
++		avz_so3{
++			description = "AVZ-SO3 kernel images";
++			kernel = "avz";
++			loadables= "avz_dt", "so3";
++			fdt = "fdt_so3";
++			ramdisk = "rootfs_so3";
++
++		};
+ 	};
+ };
+-- 
+GitLab
+

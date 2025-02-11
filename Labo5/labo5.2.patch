@@ -1,0 +1,45 @@
+From cb9cf28f93e9aa529f5cd485ceb266705122ca9e Mon Sep 17 00:00:00 2001
+From: "rafael.dousse" <rafael.dousse@heig-vd.ch>
+Date: Wed, 30 Oct 2024 16:46:27 +0100
+Subject: [PATCH] Ajouts des dts manquants
+
+---
+ linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts | 5 +++++
+ linux/linux/arch/arm/boot/dts/virt32.dts          | 5 +++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts b/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
+index d6fd31d1ea..0286cd63e3 100644
+--- a/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
++++ b/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
+@@ -29,6 +29,11 @@ memory@0 {
+ 		reg = <0 0x0 0x20000000>;
+ 	};
+ 
++	virt32@20000000 {
++		compatible = "virt32,vext";
++		/*reg = <0x0 0x20000000 0x0 0x1000>;*/
++	};
++
+ 	aliases {
+ 		serial0 = &uart1;
+ 		serial1 = &uart0;
+diff --git a/linux/linux/arch/arm/boot/dts/virt32.dts b/linux/linux/arch/arm/boot/dts/virt32.dts
+index 561bade21f..81a12f4306 100644
+--- a/linux/linux/arch/arm/boot/dts/virt32.dts
++++ b/linux/linux/arch/arm/boot/dts/virt32.dts
+@@ -6,6 +6,11 @@ / {
+ 	#address-cells = <0x02>;
+ 	compatible = "linux,dummy-virt";
+ 
++	virt32@20000000 {
++		compatible = "virt32,vext";
++		reg = <0x0 0x20000000 0x0 0x1000>;
++		interrupts = <0 50 4>; // SPI type, interrupt number 50, active high level-sensitive
++	};
+ 	psci {
+ 		migrate = <0xc4000005>;
+ 		cpu_on = <0xc4000003>;
+-- 
+GitLab
+

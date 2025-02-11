@@ -1,0 +1,366 @@
+From b9bd7b3ca2ecc3a2b49890bd439feb6bf703f879 Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Tue, 14 Jan 2025 23:14:56 +0100
+Subject: [PATCH] Fin de labo 14
+
+---
+ .../arch/arm/boot/dts/bcm2711-rpi-4-b.dts     |  6 +-
+ linux/linux/arch/arm/configs/rpi4_defconfig   |  2 +-
+ linux/linux/arch/arm/configs/virt32_defconfig |  2 +-
+ linux/linux/arch/arm/kernel/head.S            |  3 +
+ linux/linux/arch/arm/kernel/setup.c           |  3 +-
+ .../linux/arch/arm64/configs/virt64_defconfig |  2 +-
+ linux/linux/arch/arm64/kernel/head.S          |  3 +
+ linux/linux/arch/arm64/kernel/setup.c         |  1 +
+ so3/so3/configs/rpi4_defconfig                |  2 +-
+ so3/so3/dts/rpi4.dts                          |  4 +
+ target/rpi4.its                               | 41 +++++++++-
+ target/virt32.its                             | 17 +++-
+ target/virt64.its                             | 80 +++++++++++++++++++
+ 13 files changed, 153 insertions(+), 13 deletions(-)
+ create mode 100644 target/virt64.its
+
+diff --git a/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts b/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
+index c36b7f22ea..12c77bc064 100644
+--- a/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
++++ b/linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dts
+@@ -29,7 +29,11 @@ memory@0 {
+ 		reg = <0 0x0 0x20000000>;
+ 	};
+ 
+-	vext {
++	agency {
++		domain-size = <0x20000000>;
++	};
++
++	vext {	
+ 		compatible = "vext,vext";
+ 		platform_type = "rpi4";
+ 		/*reg = <0x0 0x20000000 0x0 0x1000>;*/
+diff --git a/linux/linux/arch/arm/configs/rpi4_defconfig b/linux/linux/arch/arm/configs/rpi4_defconfig
+index ed74a71b14..d7d7eeae9d 100644
+--- a/linux/linux/arch/arm/configs/rpi4_defconfig
++++ b/linux/linux/arch/arm/configs/rpi4_defconfig
+@@ -277,7 +277,7 @@ CONFIG_ARCH_MULTI_V7=y
+ CONFIG_ARCH_MULTI_V6_V7=y
+ # end of Multiple platform selection
+ 
+-# CONFIG_LINUXVIRT is not set
++CONFIG_LINUXVIRT=y
+ # CONFIG_ARCH_VIRT is not set
+ # CONFIG_ARCH_ACTIONS is not set
+ # CONFIG_ARCH_ALPINE is not set
+diff --git a/linux/linux/arch/arm/configs/virt32_defconfig b/linux/linux/arch/arm/configs/virt32_defconfig
+index d12eb02818..7013c7379c 100644
+--- a/linux/linux/arch/arm/configs/virt32_defconfig
++++ b/linux/linux/arch/arm/configs/virt32_defconfig
+@@ -262,7 +262,7 @@ CONFIG_ARCH_MULTI_V7=y
+ CONFIG_ARCH_MULTI_V6_V7=y
+ # end of Multiple platform selection
+ 
+-# CONFIG_LINUXVIRT is not set
++CONFIG_LINUXVIRT=y
+ CONFIG_ARCH_VIRT=y
+ # CONFIG_ARCH_ACTIONS is not set
+ # CONFIG_ARCH_ALPINE is not set
+diff --git a/linux/linux/arch/arm/kernel/head.S b/linux/linux/arch/arm/kernel/head.S
+index a6138f9cff..648c58d3bb 100644
+--- a/linux/linux/arch/arm/kernel/head.S
++++ b/linux/linux/arch/arm/kernel/head.S
+@@ -120,6 +120,9 @@ ENTRY(stext)
+     ldr sp, __init_sp
+ 
+ 	@ AVZ setup
++	ldr r10, =avz_shared
++	str r12, [r10]
++
+ 	bl	avz_setup
+ 
+ 	mrc	p15, 0, r9, c0, c0		@ get processor id
+diff --git a/linux/linux/arch/arm/kernel/setup.c b/linux/linux/arch/arm/kernel/setup.c
+index 168f8799b3..4a57be0e94 100644
+--- a/linux/linux/arch/arm/kernel/setup.c
++++ b/linux/linux/arch/arm/kernel/setup.c
+@@ -1101,7 +1101,8 @@ extern u64 __pv_offset;
+ 
+ void __init avz_setup(void)
+ {
+-	
++	HYPERVISOR_hypercall_addr = (volatile uint32_t *)avz_shared->hypercall_vaddr;
++
+ 
+ 	__pv_phys_pfn_offset = avz_shared->dom_phys_offset >> PAGE_SHIFT;
+ 	__pv_offset = (u64) (avz_shared->dom_phys_offset - PAGE_OFFSET);
+diff --git a/linux/linux/arch/arm64/configs/virt64_defconfig b/linux/linux/arch/arm64/configs/virt64_defconfig
+index caa5c8c9ea..5a0253ab2f 100644
+--- a/linux/linux/arch/arm64/configs/virt64_defconfig
++++ b/linux/linux/arch/arm64/configs/virt64_defconfig
+@@ -238,7 +238,7 @@ CONFIG_SLUB_CPU_PARTIAL=y
+ CONFIG_PROFILING=y
+ # end of General setup
+ 
+-# CONFIG_LINUXVIRT is not set
++CONFIG_LINUXVIRT=y
+ CONFIG_ARM64=y
+ CONFIG_64BIT=y
+ CONFIG_MMU=y
+diff --git a/linux/linux/arch/arm64/kernel/head.S b/linux/linux/arch/arm64/kernel/head.S
+index bcea7a2107..68aa353ebc 100644
+--- a/linux/linux/arch/arm64/kernel/head.S
++++ b/linux/linux/arch/arm64/kernel/head.S
+@@ -476,6 +476,9 @@ SYM_FUNC_START_LOCAL(__primary_switched)
+ 	str	x5, [x6]
+ 
+ 	// AVZ setup
++	ldr x20, =avz_shared
++	str x22, [x20]
++
+ 	bl	avz_setup
+ 
+ 	// Set new PHYS_OFFSET in x0
+diff --git a/linux/linux/arch/arm64/kernel/setup.c b/linux/linux/arch/arm64/kernel/setup.c
+index ff7d259351..1dbc5655f5 100644
+--- a/linux/linux/arch/arm64/kernel/setup.c
++++ b/linux/linux/arch/arm64/kernel/setup.c
+@@ -316,6 +316,7 @@ extern u64 __pv_offset;
+ 
+ void __init avz_setup(void)
+ {
++	HYPERVISOR_hypercall_addr = (volatile long *) avz_shared->hypercall_vaddr;
+ 
+ 	/* Retrieve the start of (virtual) RAM */
+ 	avz_guest_phys_offset = avz_shared->dom_phys_offset;
+diff --git a/so3/so3/configs/rpi4_defconfig b/so3/so3/configs/rpi4_defconfig
+index 7fed23ad4f..b7e3485622 100644
+--- a/so3/so3/configs/rpi4_defconfig
++++ b/so3/so3/configs/rpi4_defconfig
+@@ -4,7 +4,7 @@
+ #
+ CONFIG_ARCH_ARM32=y
+ # CONFIG_ARCH_ARM64 is not set
+-# CONFIG_SO3VIRT is not set
++CONFIG_SO3VIRT=y
+ CONFIG_ARCH="arm32"
+ CONFIG_CROSS_COMPILE="arm-none-eabi-"
+ # CONFIG_ARM_TRUSTZONE is not set
+diff --git a/so3/so3/dts/rpi4.dts b/so3/so3/dts/rpi4.dts
+index 5800bdbf78..a7d33a2afd 100644
+--- a/so3/so3/dts/rpi4.dts
++++ b/so3/so3/dts/rpi4.dts
+@@ -84,5 +84,9 @@
+ 		compatible = "arm,rpi4,vext";
+ 		status = "ok";
+ 	};
++
++	agency {
++		domain-size = <0x10000000>;
++	};
+ 	
+ };
+diff --git a/target/rpi4.its b/target/rpi4.its
+index fa924006fa..01b49e6b6b 100644
+--- a/target/rpi4.its
++++ b/target/rpi4.its
+@@ -52,10 +52,10 @@
+ 			load = <0x10c00000>;
+ 		};
+ 
+-		linux_so3 {
++		so3 {
+ 			description = "SO3 kernel";
+ 			data = /incbin/("../so3/so3/so3.bin");
+-			type = "kernel";
++			type = "avz";
+ 			arch = "arm";
+ 			os = "linux";
+ 			compression = "none";
+@@ -82,12 +82,31 @@
+ 			load = <0x04c0000>;
+ 		};
+ 
++		avz {
++			description = "AVZ Hypervisor (32-bit) Polymorphic SO3";
++			data = /incbin/("../avz/so3.bin");
++			type = "kernel";
++			os = "linux";
++			arch = "arm";
++			compression = "none";
++			load = <0x00008000>;
++			entry = <0x00008000>;
++		};
++			
++		avz_dt {
++			description = "Flatenned Device Tree blob for AVZ";
++			data = /incbin/("../so3/so3/dts/rpi4_avz.dtb");
++			type = "avz_dt";
++			arch = "arm";
++			compression = "none";
++			load = <0x04e00000>;
++		};
+ 	};
+ 
+ 
+ 
+ 	configurations {
+-		default = "conf_so3";
++		default = "avz_so3";
+ 
+ 		conf_linux {
+ 			description = "Linux on Raspberry Pi 4";
+@@ -101,6 +120,22 @@
+ 			fdt = "fdt_so3";
+ 			ramdisk = "rootfs_so3";
+ 		};
++		avz_so3 {
++			description = "AVZ-SO3 kernel images";
++			kernel = "avz";
++			loadables= "avz_dt", "so3";
++			fdt = "fdt_so3";
++			ramdisk = "rootfs_so3";
++		};
++
++		linux_avz {
++			description = "Linux on Raspberry Pi 4 with AVZ";
++			kernel = "avz";
++			loadables = "avz_dt", "linux";
++			fdt = "fdt_linux";
++			ramdisk = "initrd";
++		};
++
+ 	};
+ 
+ };
+diff --git a/target/virt32.its b/target/virt32.its
+index dc120b55c3..74b6a7d552 100644
+--- a/target/virt32.its
++++ b/target/virt32.its
+@@ -26,8 +26,8 @@
+ 		linux {
+ 			description = "Linux kernel";
+ 			data = /incbin/("../linux/linux/arch/arm/boot/Image");
+-			/* type = "avz" */
+-			type = "kernel";
++			type = "avz" 
++			/*type = "kernel";*/
+ 			arch = "arm";
+ 			os = "linux";
+ 			compression = "none";
+@@ -108,10 +108,10 @@
+ 
+ 	};
+ 	configurations {
+-		default = "avz_so3";
++		default = "linux";
+ 	
+ 		linux {
+-			description = "SO3 kernel image including device tree";
++			description = "linux kernel image including device tree";
+ 			kernel = "linux";
+ 			fdt = "fdt_linux";
+ 			ramdisk = "initrd";
+@@ -130,7 +130,16 @@
+ 			loadables= "avz_dt", "so3";
+ 			fdt = "fdt_so3";
+ 			ramdisk = "rootfs_so3";
++		};
++
++		linux_avz{
++			description = "linux kernel image including device tree and AVZ";
++			kernel = "avz";
++			loadables = "avz_dt", "linux";
++			fdt = "fdt_linux";	
++			ramdisk = "initrd";
+ 
+ 		};
++
+ 	};
+ };
+diff --git a/target/virt64.its b/target/virt64.its
+new file mode 100644
+index 0000000000..29a200df98
+--- /dev/null
++++ b/target/virt64.its
+@@ -0,0 +1,80 @@
++/dts-v1/;
++
++/ {
++	description = "Kernel and rootfs components for virt64 environment";
++    images{
++
++        linux{
++            description = "Linux kernel";
++			data = /incbin/("../linux/linux/arch/arm64/boot/Image");
++			type = "avz";
++			arch = "arm64";
++			os = "linux";
++			compression = "none";
++			load = <0x41000000>;
++			entry = <0x41000000>;
++        };
++
++        fdt_linux{
++            description = "Linux device tree blob";
++			data = /incbin/("../linux/linux/arch/arm64/boot/dts/arm/virt64.dtb");
++			type = "flat_dt";
++			arch = "arm64";
++			compression = "none";
++			load = <0x5a000000>;
++        };
++
++        initrd{
++            description = "Initial rootfs (initrd)";
++			data = /incbin/("../rootfs/board/virt64/initrd.cpio");
++			type = "ramdisk";
++			arch = "arm64";
++			os = "linux";
++			compression = "none";
++			load = <0x50c00000>;
++        };
++
++        avz{
++            description = "AVZ Hypervisor (64-bit Polymorphic so3)";
++            data = /incbin/("../avz/so3.bin");
++            type = "kernel";
++            arch = "arm64";
++            os = "linux";
++            compression = "none";
++            load = <0x40080000>;
++            entry = <0x40080000>;
++        };
++
++        avz_dt{
++            description = "Flattened Device Tree blob for AVZ";
++            data = /incbin/("../avz/source/dts/virt64_avz_pv.dtb");
++            type = "avz_dt";
++            arch = "arm";
++            compression = "none";
++            load = <0x40b00000>;
++        };
++
++    };
++
++    configurations {
++        default = "linux_avz" ;
++
++        linux{
++            description = "linux kernel image including device tree";
++			kernel = "linux";
++			fdt = "fdt_linux";
++			ramdisk = "initrd";
++        };
++
++        linux_avz{
++            description = "linux kernel image including device tree and AVZ";
++			kernel = "avz";
++			loadables = "avz_dt", "linux";
++			fdt = "fdt_linux";	
++			ramdisk = "initrd";
++
++        };
++
++    };
++
++};
+-- 
+GitLab
+

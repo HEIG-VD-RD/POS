@@ -1,0 +1,656 @@
+From cf26fdffc64ce70ba10cecdd51ff393342b222a6 Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Mon, 25 Nov 2024 08:11:03 +0100
+Subject: [PATCH] Fin de labo09
+
+---
+ so3/so3/devices/Makefile   |   2 +
+ so3/so3/devices/vext.c     | 210 +++++++++++++++++++++++++++++++++++++
+ so3/so3/dts/virt32.dts     | 120 +++++++++++----------
+ so3/usr/out/dev/led0       |   0
+ so3/usr/out/dev/led1       |   0
+ so3/usr/out/dev/led2       |   0
+ so3/usr/out/dev/led3       |   0
+ so3/usr/out/dev/led4       |   0
+ so3/usr/src/CMakeLists.txt |   5 +-
+ so3/usr/src/vextctl.c      |  79 ++++++++++++++
+ target/virt32.its          |  41 +++++++-
+ 11 files changed, 395 insertions(+), 62 deletions(-)
+ create mode 100644 so3/so3/devices/vext.c
+ create mode 100644 so3/usr/out/dev/led0
+ create mode 100644 so3/usr/out/dev/led1
+ create mode 100644 so3/usr/out/dev/led2
+ create mode 100644 so3/usr/out/dev/led3
+ create mode 100644 so3/usr/out/dev/led4
+ create mode 100644 so3/usr/src/vextctl.c
+
+diff --git a/so3/so3/devices/Makefile b/so3/so3/devices/Makefile
+index 39f1b44a8f..61b45d5ef5 100644
+--- a/so3/so3/devices/Makefile
++++ b/so3/so3/devices/Makefile
+@@ -19,3 +19,5 @@ obj-$(CONFIG_INPUT) += input/
+ obj-y += timer/ irq/
+ 
+ obj-y += mydev.o
++
++obj-y += vext.o
+\ No newline at end of file
+diff --git a/so3/so3/devices/vext.c b/so3/so3/devices/vext.c
+new file mode 100644
+index 0000000000..5f59013729
+--- /dev/null
++++ b/so3/so3/devices/vext.c
+@@ -0,0 +1,210 @@
++/*
++ * Copyright (C) 2016-2018 Daniel Rossier <daniel.rossier@heig-vd.ch>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
++ *
++ */
++
++ /* Simple of example of devclass device */
++
++#include <vfs.h>
++#include <asm/io.h>
++#include <asm/mmu.h>
++#include <heap.h>
++#include <completion.h>
++#include <include/string.h>
++
++#include <device/driver.h>
++
++ // Offsets Registers
++#define LED_OFFSET 0x3a
++#define SWITCHES_OFFSET 0x12
++#define IRQ_CTRL 0x18
++
++#define BUFFER_MAX 10
++
++#define LED_ID_MIN 0
++#define LED_ID_MAX 4
++
++/**
++ * Comment fonctionne le parsing du device tree:
++ * La fonction parse_dtb va parcourir le Device Tree
++ * et récupérer tous les noeuds donc le status est "ok" avec la fonction fdt_device_is_available.
++ * Ensuite, il initialise la structure dev_t qui est allouée dynamiquement et stocke les informations comme compatible, status...
++ * Les drivers sont normalement triés par niveau d'initialisation (core, postcore, etc.). Chaque périphérique est comparé avec les chaînes compatible des drivers
++ * et s'il y en a un qui correspond, alors sa fonction d'initialisation est appelée.
++ * Et nous on enregistre notre driver avec REGISTER_DRIVER_POSTCORE("arm,vext", vext_init);
++ */
++
++
++typedef struct {
++    // Base address of the device
++    void* base;
++    // Address of the led register
++    void* led_addr;
++} private_vext_t;
++
++
++/**
++ * @brief Write callback to  interact with the vext device (write a value to the leds)
++ * @param fd File descriptor
++ * @param buffer Buffer to write
++ * @param count Number of bytes to write
++ * @return Number of bytes written
++ */
++static int vext_write(int fd, const void* buffer, int count) {
++
++    int dev_id;
++    uint16_t led_state;
++    uint16_t value;
++    uint16_t data;
++    struct devclass* dev;
++    private_vext_t* priv_vext;
++
++    if (count != sizeof(char)) {
++        printk("Invalid input\n", (char*)buffer);
++        return -1;
++    }
++
++    if (*((char*)buffer) != '0' && *((char*)buffer) != '1') {
++        printk("Invalid input value: %s. Expected '0' or '1'.\n", (char*)buffer);
++        return -1;
++    }
++
++
++    // Get the device class, private structure and device id
++    dev = devclass_by_fd(fd);
++    priv_vext = (private_vext_t*)devclass_get_priv(dev);
++    dev_id = devclass_fd_to_id(fd);
++
++    // Convert the buffer to an integer
++    data = (uint16_t)(*((char*)buffer) - '0');
++    // Read the current state of the leds
++    led_state = ioread16(priv_vext->led_addr);
++
++    // Set the value to write to the led register
++    value = data == 1 ? led_state | (1 << dev_id) : led_state & ~(1 << dev_id);
++    // Write the value to the led register
++    iowrite16(priv_vext->led_addr, value);
++
++    return count;
++}
++
++/**
++ * @brief Read callback to interact with the vext device (read the state of the led)
++ */
++static int vext_read(int fd, void* buffer, int count) {
++
++    int dev_id;
++    uint16_t leds_state;
++    uint16_t unique_led;
++    struct devclass* dev;
++    private_vext_t* priv_vext;
++
++    if (!buffer || count < (2 * sizeof(char))) {
++        printk("Invalid buffer or insufficient count for read.\n");
++        return -1;
++    }
++
++
++    // This is specifique for cat that won't stop otherwise
++    // Variable statique to keep trace of reading
++    static int read_done = 0;
++    if (read_done) {
++        // If the read has already been done, return 0
++        read_done = 0;
++        return 0;
++    }
++
++
++    // Get the device class, private structure and device id
++    dev = devclass_by_fd(fd);
++    priv_vext = (private_vext_t*)devclass_get_priv(dev);
++    dev_id = devclass_fd_to_id(fd);
++
++    if (dev_id < 0 || dev_id >= 5) {
++        printk("Invalid device ID: %d\n", dev_id);
++        return -1;
++    }
++
++    // Read the state of the leds
++    leds_state = ioread16(priv_vext->led_addr);
++    // Get the state of the led wanted with dev_id
++    unique_led = (leds_state >> dev_id) & 0x1;
++
++    // Write the state of the led to the buffer 
++    snprintf((char*)buffer, 2 * sizeof(char), "%d", unique_led);
++
++    read_done = 1;
++    return strlen((char*)buffer);
++}
++
++/**
++ * @brief File operations for the vext device
++ */
++struct file_operations vext_fops = {
++    .write = vext_write,
++    .read = vext_read
++};
++
++/**
++ * @brief Device class for the vext device
++ */
++struct devclass vext_dev = {
++    .class = "led",
++    .type = VFS_TYPE_DEV_CHAR,
++    .fops = &vext_fops,
++    .id_start = LED_ID_MIN,
++    .id_end = LED_ID_MAX,
++};
++
++/**
++ * @brief Initialize the vext device
++ */
++int vext_init(dev_t* dev, int fdt_offset) {
++    int node;
++    int prop_len;
++    const char* propname;
++    const struct fdt_property* prop;
++    private_vext_t* priv_vext;
++
++    // Allocate memory for the private structure
++    priv_vext = malloc(sizeof(private_vext_t));
++    BUG_ON(!priv_vext);
++
++    // Set the private structure
++    devclass_set_priv(&vext_dev, priv_vext);
++    // Register the device
++    devclass_register(dev, &vext_dev);
++    // Get the node offset
++    node = fdt_find_node_by_name(__fdt_addr, 0, "arm,vext");
++    // Get the compatible property
++    fdt_property_read_string(__fdt_addr, node, "compatible", &propname);
++    // Get the reg property
++    prop = fdt_get_property(__fdt_addr, fdt_offset, "reg", &prop_len);
++    BUG_ON(!prop);
++    BUG_ON(prop_len != 2 * sizeof(unsigned long));
++
++    // Map the device
++    priv_vext->base = (void*)io_map(fdt32_to_cpu(((const fdt32_t*)prop->data)[0]), fdt32_to_cpu(((const fdt32_t*)prop->data)[1]));;
++    // Set the led address
++    priv_vext->led_addr = (u16*)priv_vext->base + (LED_OFFSET / 2);
++
++    iowrite16(priv_vext->led_addr, 0x1);
++    printk("Init done\n");
++    return 0;
++}
++
++
++REGISTER_DRIVER_POSTCORE("arm,vext", vext_init);
+diff --git a/so3/so3/dts/virt32.dts b/so3/so3/dts/virt32.dts
+index 931da18951..17ed1ed280 100644
+--- a/so3/so3/dts/virt32.dts
++++ b/so3/so3/dts/virt32.dts
+@@ -1,40 +1,40 @@
+ /*
+- * Copyright (C) 2014-2023 Daniel Rossier <daniel.rossier@heig-vd.ch>
+- * 
+- * This program is free software; you can redistribute it and/or modify
+- * it under the terms of the GNU General Public License version 2 as
+- * published by the Free Software Foundation.
+- *
+- * This program is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+- * GNU General Public License for more details.
+- *
+- * You should have received a copy of the GNU General Public License
+- * along with this program; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+- *
+- */
+- 
++* Copyright (C) 2014-2023 Daniel Rossier <daniel.rossier@heig-vd.ch>
++*
++* This program is free software; you can redistribute it and/or modify
++* it under the terms of the GNU General Public License version 2 as
++* published by the Free Software Foundation.
++*
++* This program is distributed in the hope that it will be useful,
++* but WITHOUT ANY WARRANTY; without even the implied warranty of
++* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++* GNU General Public License for more details.
++*
++* You should have received a copy of the GNU General Public License
++* along with this program; if not, write to the Free Software
++* Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
++*
++*/
++
+ /dts-v1/;
+- 
++
+ / {
+ 	model = "SO3 Virt32";
+ 	compatible = "arm,virt32";
+-
++	
+ 	#address-cells = <1>;
+ 	#size-cells = <1>;
+-
++	
+ 	cpus {
+ 		device_type = "cpu";
+ 		compatible = "arm,virt32";
+ 	};
+-
++	
+ 	memory {
+ 		device_type = "memory";
+ 		reg = <0x41000000 0x20000000>; /* 512 MB */
+ 	};
+-
++	
+ 	fw-cfg@9020000 {
+ 		reg = <0x9020000 0x18>;
+ 		compatible = "qemu,fw-cfg-mmio";
+@@ -48,8 +48,8 @@
+ 		#interrupt-cells = <3>;
+ 		
+ 		reg = <0x08000000 0x1000
+-			   0x08010000 0x1000>;
+-			  
++		0x08010000 0x1000>;
++		
+ 		status = "ok";
+ 	};
+ 	
+@@ -61,7 +61,7 @@
+ 		interrupts = <0 1 4>;
+ 		status = "ok";
+ 	};
+-
++	
+ #if 1 /* If we want to use ARM CP15 timer */
+ 	/* Periodic timer based on ARM CP15 timer */
+ 	periodic-timer {
+@@ -77,7 +77,7 @@
+ 		status = "ok";
+ 	};
+ #endif
+-
++	
+ #if 0 /* Basic SP804 on-board timer */
+ 	/* Periodic timer (Dual-timer 01) */
+ 	periodic-timer@1c110000 {
+@@ -87,7 +87,7 @@
+ 		interrupts = <0 2 4>;
+ 		status = "ok";
+ 	};
+-
++	
+ 	/* Oneshot timer (Dual-timer 23) */
+ 	oneshot-timer@1c120000 {
+ 		compatible = "sp804,oneshot-timer";
+@@ -96,7 +96,7 @@
+ 		interrupts = <0 3 4>;
+ 		status = "ok";
+ 	};
+-
++	
+ 	/* Free-running clocksource */
+ 	clocksource-timer@1c110020 {
+ 		compatible = "sp804,clocksource-timer";
+@@ -104,7 +104,7 @@
+ 		status = "ok";
+ 	};
+ #endif
+-
++	
+ 	/* MMC */
+ 	mmc@1c050000 {
+ 		compatible = "virt32,mmc-pl180";
+@@ -116,63 +116,69 @@
+ 		clock_min = <251256>;
+ 		clock_max = <6250000>;
+ 		b_max = <127>;
+-
++		
+ 		status = "ok";
+ 	};
+-
++	
+ 	mydev {
+ 		compatible = "arm,mydev";
+ 		status = "ok";
+ 	};
+-
++	
++	vext {
++		compatible = "arm,vext";
++		status = "ok";
++		reg = <0x20000000 0x1000>;
++	};
++	
+ 	/* PL111 Color LCD Controller
+-	 *   http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0293c/index.html
+-	 */
++	*   http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0293c/index.html
++	*/
+ 	clcd@08800000{
+ 		compatible = "arm,pl111";
+ 		reg = <0x08800000 0x1000>;
+-
++		
+ 		status = "ok";
+ 	};
+-
++	
+ 	/* PL050 PS2 Keyboard/Mouse Interface
+-	 *   http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0143c/index.html
+-	 */
++	*   http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0143c/index.html
++	*/
+ 	kmi@0x08801000 { /* keyboard */
+ 		compatible = "arm,pl050,keyboard";
+ 		reg = <0x08801000 0x1000>;
+ 		interrupt-parent = <&gic>;
+ 		interrupts = <0 36 4>;
+-
++		
+ 		status = "ok";
+ 	};
+-
++	
+ 	/* PL050 PS2 Keyboard/Mouse Interface
+-	 *   http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0143c/index.html
+-	 */
++	*   http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0143c/index.html
++	*/
+ 	kmi@0x08802000 { /* mouse */
+ 		compatible = "arm,pl050,mouse";
+ 		reg = <0x08802000  0x1000>;
+ 		
+ 		interrupt-parent = <&gic>;
+ 		interrupts = <0 37 4>;
+-
++		
+ 		status = "ok";
+ 	};
+ 	
+ 	/*
+-        https://github.com/psawargaonkar/xvisor-next/blob/95b887c82a37c8d9ee126e061cf4d8f383ec7d01/arch/arm/board/generic/dts/vexpress/a15/vexpress-a15.dtsi
+-        https://github.com/avpatel/xvisor-next/blob/master/tests/arm32/vexpress-a15/vexpress-a15-guest.dts
+-   	 */
+-    ethernet@1a000000 {
+-        compatible = "smsc,smc911x";
+-        reg = <0x1a000000 0x1000>;
+-        
+-    	interrupt-parent = <&gic>;
+-        interrupts = <0 15 4>;
+-        switch = "br0";
+-
+-        status = "ok";
+-    };
+-    	
++	https://github.com/psawargaonkar/xvisor-next/blob/95b887c82a37c8d9ee126e061cf4d8f383ec7d01/arch/arm/board/generic/dts/vexpress/a15/vexpress-a15.dtsi
++	https://github.com/avpatel/xvisor-next/blob/master/tests/arm32/vexpress-a15/vexpress-a15-guest.dts
++	*/
++	ethernet@1a000000 {
++		compatible = "smsc,smc911x";
++		reg = <0x1a000000 0x1000>;
++		
++		interrupt-parent = <&gic>;
++		interrupts = <0 15 4>;
++		switch = "br0";
++		
++		status = "ok";
++	};
++	
+ };
+diff --git a/so3/usr/out/dev/led0 b/so3/usr/out/dev/led0
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/so3/usr/out/dev/led1 b/so3/usr/out/dev/led1
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/so3/usr/out/dev/led2 b/so3/usr/out/dev/led2
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/so3/usr/out/dev/led3 b/so3/usr/out/dev/led3
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/so3/usr/out/dev/led4 b/so3/usr/out/dev/led4
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/so3/usr/src/CMakeLists.txt b/so3/usr/src/CMakeLists.txt
+index 1ab368ffb3..3b8fcd4264 100644
+--- a/so3/usr/src/CMakeLists.txt
++++ b/so3/usr/src/CMakeLists.txt
+@@ -6,6 +6,7 @@ add_executable(time.elf time.c)
+ add_executable(ping.elf ping.c)
+ add_executable(echo.elf echo.c)
+ add_executable(cat.elf cat.c)
++add_executable(vextctl.elf vextctl.c)
+ 
+ add_subdirectory(widgets)
+ add_subdirectory(stress)
+@@ -17,6 +18,4 @@ target_link_libraries(time.elf c)
+ target_link_libraries(ping.elf c)
+ target_link_libraries(echo.elf c)
+ target_link_libraries(cat.elf c)
+-
+-
+-
++target_link_libraries(vextctl.elf c)
+diff --git a/so3/usr/src/vextctl.c b/so3/usr/src/vextctl.c
+new file mode 100644
+index 0000000000..e6b6b703e3
+--- /dev/null
++++ b/so3/usr/src/vextctl.c
+@@ -0,0 +1,79 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define HORIZONTAL_LEDS {"/dev/led1", "/dev/led0", "/dev/led3"}
++#define VERTICAL_LEDS {"/dev/led0", "/dev/led2", "/dev/led4"}
++#define DELAY 500000 // 500 ms
++
++/**
++ * @brief Set the state of an LED
++ * @param led_name The name of the LED
++ * @param state The state to set (0 or 1)
++ */
++void set_led_state(const char *led_name, int state)
++{
++	char led_brightness_path[256];
++	// Create the path to the LED brightness file
++	snprintf(led_brightness_path, sizeof(led_brightness_path), "%s", led_name);
++
++	int fd = open(led_brightness_path, O_WRONLY);
++	if (fd < 0)
++	{
++		perror("Error opening LED brightness");
++		exit(EXIT_FAILURE);
++	}
++
++	// Convert state to string ("0" or "1") and write to LED brightness
++	char state_str[2];
++	snprintf(state_str, sizeof(state_str), "%d", state);
++
++	// Write state to the LED and close the file
++	lseek(fd, 0, SEEK_SET);
++	if (write(fd, state_str, strlen(state_str)) < 0)
++	{
++		perror("Error writing LED state");
++		close(fd);
++		exit(EXIT_FAILURE);
++	}
++	close(fd);
++}
++
++/**
++ * @brief Toggle the state of a set of LEDs
++ * @param leds_on The names of the LEDs to turn on
++ * @param leds_off The names of the LEDs to turn off
++ * @param count The number of LEDs to toggle
++ */
++void toggle_leds(const char **leds_on, const char **leds_off, int count)
++{
++	for (int i = 0; i < count; i++)
++	{
++		set_led_state(leds_off[i], 0);
++	}
++	for (int i = 0; i < count; i++)
++	{
++		set_led_state(leds_on[i], 1);
++	}
++}
++
++int main(int argc, char **argv)
++
++{
++	const char *horizontal_leds[] = HORIZONTAL_LEDS;
++	const char *vertical_leds[] = VERTICAL_LEDS;
++
++	while (1)
++	{
++		toggle_leds(horizontal_leds, vertical_leds, 3);
++		usleep(DELAY);
++
++		toggle_leds(vertical_leds, horizontal_leds, 3);
++		usleep(DELAY);
++	}
++
++	return 0;
++}
+diff --git a/target/virt32.its b/target/virt32.its
+index 1461890459..30d45b4c5a 100644
+--- a/target/virt32.its
++++ b/target/virt32.its
+@@ -54,15 +54,52 @@
+ 			load = <0x50c00000>;
+ 		};
+ 
++		linux_so3 {
++			description = "SO3 kernel";
++			data = /incbin/("../so3/so3/so3.bin");
++			type = "kernel";
++			arch = "arm";
++			os = "linux";
++			compression = "none";
++			load = <0x41008000>;
++			entry = <0x41008000>;
++		};
++
++		fdt_so3 {
++			description = "SO3 device tree blob";
++			data = /incbin/("../so3/so3/dts/virt32.dtb");
++			type = "flat_dt";
++			arch = "arm";
++			compression = "none";
++			load = <0x44a00000>;
++		};
++
++		rootfs_so3 {
++			description = "SO3 root filesystem";
++			data = /incbin/("../rootfs/board/virt32/rootfs.fat");
++			type = "ramdisk";
++			arch = "arm";
++			os = "linux";
++			compression = "none";
++			load = <0x44c00000>;
++		};
++
+ 	};
+ 	configurations {
+-		default = "linux";
+-
++		default = "so3";
++	
+ 		linux {
+ 			description = "SO3 kernel image including device tree";
+ 			kernel = "linux";
+ 			fdt = "fdt_linux";
+ 			ramdisk = "initrd";
+ 		};
++	
++		so3 {
++			description = "SO3 kernel image with device tree and rootfs";
++			kernel = "linux_so3";
++			fdt = "fdt_so3";
++			ramdisk = "rootfs_so3";
++		};
+ 	};
+ };
+-- 
+GitLab
+

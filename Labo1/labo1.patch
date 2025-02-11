@@ -1,0 +1,60 @@
+From 162bbe3d9685e9b68d614ba7828811f6de1c7af3 Mon Sep 17 00:00:00 2001
+From: "rafael.dousse" <rafael.dousse@heig-vd.ch>
+Date: Fri, 20 Sep 2024 10:25:08 +0200
+Subject: [PATCH] feat: command hello implemented
+
+---
+ qemu/pc-bios/keymaps/meson.build |  2 +-
+ u-boot/cmd/Makefile              |  1 +
+ u-boot/cmd/hello.c               | 15 +++++++++++++++
+ 3 files changed, 17 insertions(+), 1 deletion(-)
+ create mode 100644 u-boot/cmd/hello.c
+
+diff --git a/qemu/pc-bios/keymaps/meson.build b/qemu/pc-bios/keymaps/meson.build
+index 158a3b410c..1cbcdebefa 100644
+--- a/qemu/pc-bios/keymaps/meson.build
++++ b/qemu/pc-bios/keymaps/meson.build
+@@ -1,5 +1,5 @@
+ keymaps = {
+-  'ar': '-l ar',
++  'ar': '-l ara',
+   'bepo': '-l fr -v dvorak',
+   'cz': '-l cz',
+   'da': '-l dk',
+diff --git a/u-boot/cmd/Makefile b/u-boot/cmd/Makefile
+index 166c652d98..903888ea7e 100644
+--- a/u-boot/cmd/Makefile
++++ b/u-boot/cmd/Makefile
+@@ -10,6 +10,7 @@ obj-$(CONFIG_CMD_BOOTM) += bootm.o
+ obj-y += help.o
+ obj-y += panic.o
+ obj-y += version.o
++obj-y += hello.o
+ 
+ # command
+ obj-$(CONFIG_CMD_ACPI) += acpi.o
+diff --git a/u-boot/cmd/hello.c b/u-boot/cmd/hello.c
+new file mode 100644
+index 0000000000..d3d446cc3b
+--- /dev/null
++++ b/u-boot/cmd/hello.c
+@@ -0,0 +1,15 @@
++#include <common.h>
++#include <command.h>
++
++/**
++ * Function to be called for the command
++ */
++static int do_hello(struct cmd_tbl *cmdtp, int flag, int argc,
++		    char *const argv[])
++{
++	printf("Oh hey beautiful!!\n");
++	return 0;
++}
++
++// Command 
++U_BOOT_CMD(hello, 1, 1, do_hello, "Nice to meet you", "")
+\ No newline at end of file
+-- 
+GitLab
+

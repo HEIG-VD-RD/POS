@@ -1,0 +1,234 @@
+From 367a0f1c01357632933447dc3fbbf93cd465fa1f Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Sun, 15 Dec 2024 20:59:40 +0100
+Subject: [PATCH] Fin de labo12
+
+---
+ README.md              | 34 +++++++++++++++++--
+ build.conf             |  1 -
+ so3/so3/devices/vext.c | 74 ++++++++++++++++++++++++++++++------------
+ so3/so3/dts/rpi4.dts   |  2 +-
+ 4 files changed, 86 insertions(+), 25 deletions(-)
+
+diff --git a/README.md b/README.md
+index 3efd168493..426b5bd676 100644
+--- a/README.md
++++ b/README.md
+@@ -1,8 +1,36 @@
++# Reponse labo12
+ 
+-Be careful with the requirements of various configs.
++- *En effectuant du pas-à-pas trouver le fichier et la fonction qui s’occupe d’afficher le tout premier message de U-Boot* 
++-> Le tout premier message qui est `U-Boot 2022.04 ...` apparait dans le fichier arch/armlib/ctr0.s du dossier U-boot.
+ 
+-- avz_vt -> ./st must have virtualization on => use ./stv
+-- avz_pv -> ./st must have virtualization off => use ./st
++- *Examiner la Backtrace puis faites une brève explication de ce qu’il se passe après avoir entré la commande jusqu’à l’appel de cette fonction*
+ 
++Dans le backtrace, on peut commencer par voir la fonction principale, `do_version` qui se trouve dans le fichier `cmd/version.c` à la ligne 27. Elle est chargée d'afficher la version d'U-Boot en appelant printf pour imprimer la bannière obtenue via `display_options_get_banner`.
+ 
++Cette fonction est appelée depuis cmd_call située dans `common/command.c` qui est responsable d'exécuter les commandes U-Boot, comme la commande version, en traitant les arguments fournis. Ensuite, `cmd_process` prend en charge l'appel et gère les arguments, vérifie si la commande peut être répétée et appelle cmd_call.
+ 
++Le traitement des commandes passe ensuite par des fonctions de l'interpréteur de commandes U-Boot comme `run_pipe_real` et `run_list_real`, qui analysent et exécutent les commandes fournies par l'utilisateur. Ensuite, on rentre dans une boucle d'exécution continue via la fonction `cli_loop` située dans `common/cli.c`. Cette boucle permet à U-Boot de gérer les entrées utilisateur.
++
++L'exécution atteint la fonction `main_loop` dans `common/main.c`, qui représente la boucle principale d'U-Boot où les commandes sont exécutées. Avant cela, U-Boot initialise les périphériques et sous-systèmes grâce à `board_init_r` dans `common/board_r.c`. Cette étape suit l'entrée initiale `_main`, située dans le fichier `arch/arm/lib/crt0.S`, qui est le point de départ écrit en assembleur. Cette fonction prépare l'environnement d'exécution d'U-Boot et démarre le processus d'initialisation.
++
++```c
++Thread 1 hit Breakpoint 1.2, do_version (cmdtp=0x7ffe3c44, flag=0, argc=1, argv=0x7ef1b720) at cmd/version.c:27
++27		printf(display_options_get_banner(false, buf, sizeof(buf)));
++(gdb) backtrace
++#0  do_version (cmdtp=0x7ffe3c44, flag=0, argc=1, argv=0x7ef1b720) at cmd/version.c:27
++#1  0x7ff7c97c in cmd_call (repeatable=0x7ee18d74, argv=0x7ef1b720, argc=1, flag=<optimized out>, cmdtp=0x7ffe3c44)
++    at common/command.c:580
++#2  cmd_process (flag=<optimized out>, argc=1, argv=0x7ef1b720, repeatable=0x7ffe5970, ticks=0x0) at common/command.c:635
++#3  0x7ff73934 in run_pipe_real (pi=0x7ef1b668) at common/cli_hush.c:1676
++#4  run_list_real (pi=pi@entry=0x7ef1b668) at common/cli_hush.c:1873
++#5  0x7ff73a9c in run_list (pi=0x7ef1b668) at common/cli_hush.c:2022
++#6  parse_stream_outer (inp=0x7ee18e5c, inp@entry=0x7ee18e54, flag=flag@entry=2) at common/cli_hush.c:3206
++#7  0x7ff74058 in parse_file_outer () at common/cli_hush.c:3289
++#8  0x7ff7bec8 in cli_loop () at common/cli.c:229
++#9  0x7ff7209c in main_loop () at common/main.c:66
++#10 0x7ff74690 in run_main_loop () at common/board_r.c:584
++#11 0x7ff7492c in initcall_run_list (init_sequence=0x7ffe0404) at include/initcall.h:46
++#12 board_init_r (new_gd=<optimized out>, dest_addr=<optimized out>) at common/board_r.c:822
++#13 0x7ff5aac4 in _main () at arch/arm/lib/crt0.S:179
++
++```
+diff --git a/build.conf b/build.conf
+index a0276ffa53..cbf07a034e 100644
+--- a/build.conf
++++ b/build.conf
+@@ -1,2 +1 @@
+ PLATFORM := virt32
+-
+diff --git a/so3/so3/devices/vext.c b/so3/so3/devices/vext.c
+index e0782de9d9..8b0ec713fd 100644
+--- a/so3/so3/devices/vext.c
++++ b/so3/so3/devices/vext.c
+@@ -44,7 +44,8 @@
+ typedef enum { VIRT32 = 1, RPI4 } platform_t;
+ 
+ // Array of keys for virt32
+-static int keys_virt32[] = { KEY_ENTER, KEY_LEFT, KEY_UP, KEY_RIGHT,  KEY_DOWN };
++static u16 keys_virt32[] = { KEY_ENTER, KEY_LEFT, KEY_UP, KEY_RIGHT,  KEY_DOWN };
++static u16 keys_rpi4[] = { CENTER, LEFT, UP, RIGHT,  DOWN };
+ 
+ typedef struct {
+     int id;
+@@ -87,7 +88,7 @@ uint8_t decode_switch(uint8_t encoded_value)
+         return (1 << (encoded_value - 1));
+     }
+     printk("(module) Invalid switch value: 0x%x\n", encoded_value);
+-    return 00;
++    return 0;
+ }
+ 
+ /**
+@@ -97,7 +98,9 @@ uint8_t decode_switch(uint8_t encoded_value)
+  */
+ static irq_return_t switch_interrupt_deferred(int irq, void* arg) {
+     private_vext_t* priv = (private_vext_t*)arg;
++  
+     complete(&priv->completion);
++   
+     return IRQ_COMPLETED;
+ }
+ 
+@@ -116,14 +119,42 @@ static irq_return_t switch_interrupt_isr(int irq, void* arg) {
+     // Clear the IRQ by writing to IRQ_CTRL
+     priv->switch_value = switches;
+     iowrite16(priv->irq_ctrl, IRQ_CLEAR);
+-
++   
+     return IRQ_BOTTOM;
+ }
+ 
+ // Might need it for the joystick
+-/* void joystick_handler(void* arg, int key) {
++void joystick_handler(void* arg, int key) {
+     printk("(module) Joystick key: %d\n", key);
+-} */
++    private_vext_t* priv = (private_vext_t*)arg;
++    printk("(module) priv \n");
++    int i;
++    u16 pressed_key;
++
++    pressed_key = 0;
++
++    for( i = 0; i < NUM_SWITCHES; i++) {
++        if (key == keys_rpi4[i]) {
++            // This is probably not the best way to do it but since we have the same number 
++            // of keys for the virt32 and the rpi4 and the same order, 
++            // we can use the same index so we don't have to rely on the platform in the user application
++            pressed_key = keys_virt32[i];
++
++            break;
++        }
++    }
++    printk("(module) pressed_key: %d\n", pressed_key);
++    if(!pressed_key) {
++        printk("(module) Error key input\n");
++        return;
++    }
++
++    priv->switch_value = pressed_key;
++    printk("(module) priv->switch_value: %d\n", priv->switch_value);
++    complete(&priv->completion);
++    printk("(module) completion done\n");
++
++}
+ 
+ /**
+  * @brief Write callback to  interact with the vext device (write a value to the leds)
+@@ -174,7 +205,7 @@ static int vext_write(int fd, const void* buffer, int count) {
+         iowrite16(priv_vext->led_addr, value);
+     }
+     else if (priv_vext->platform == RPI4) {
+-        display_led(dev_id, data);
++        //display_led(dev_id, data);
+     }
+ 
+     return count;
+@@ -220,7 +251,6 @@ static int vext_read(int fd, void* buffer, int count) {
+ 
+     // Write the state of the led to the buffer 
+     snprintf((char*)buffer, 2 * sizeof(char), "%d", unique_led);
+-
+     read_done = 1;
+     return strlen((char*)buffer);
+ }
+@@ -248,15 +278,20 @@ static int vext_switch_read(int fd, void* buffer, int count) {
+     // Wait for the interrupt to be raised
+     wait_for_completion(&priv->completion);
+ 
+-    // Find the pressed key
+-    for (i = 0; i < NUM_SWITCHES; i++) {
+-        if (priv->switch_value == (1 << i)) {
+-            pressed_key = keys_virt32[i];
+-            break;
++    if(priv->platform == VIRT32){
++        // Find the pressed key
++        for (i = 0; i < NUM_SWITCHES; i++) {
++            if (priv->switch_value == (1 << i)) {
++                pressed_key = keys_virt32[i];
++                break;
++            }
+         }
++        // Set the event code
++        priv->ev.code = pressed_key;
++
++    } else if(priv->platform == RPI4){
++        priv->ev.code = priv->switch_value;
+     }
+-    // Set the event code
+-    priv->ev.code = pressed_key;
+ 
+     // Write the event to the buffer
+     memcpy(buffer, &priv->ev, sizeof(struct input_event));
+@@ -412,13 +447,12 @@ int vext_rpi4_init(dev_t* dev, int fdt_offset) {
+     // Register the switch device
+     devclass_register(dev, &vext_switch_dev);
+ 
+-    // might need it at a later stage
+-    //rpisense_joystick_handler_register(dev, joystick_handler);
++    //rpisense_joystick_handler_register(priv_vext, joystick_handler);
+ 
+     priv_vext->platform = RPI4;
+ 
+-    // Initialize the completion -> might be used for the joystick
+-    //init_completion(&priv_vext->completion);
++    // Initialize the completion
++    init_completion(&priv_vext->completion);
+ 
+     for (i = 0; i < NUM_LEDS; i++) {
+         priv_vext->leds[i].id = 1 << i;
+@@ -436,10 +470,10 @@ int vext_rpi4_init(dev_t* dev, int fdt_offset) {
+  */
+ void postinit_call(void) {
+     printk("Postinit call \n");
+-    rpisense_matrix_off();
++    //rpisense_matrix_off();
+ }
+ 
+ 
+ REGISTER_DRIVER_POSTCORE("arm,virt32,vext", vext_virt32_init);
+-REGISTER_DRIVER_POSTCORE("arm,rpi4,vext", vext_rpi4_init);
++//REGISTER_DRIVER_POSTCORE("arm,rpi4,vext", vext_rpi4_init);
+ REGISTER_DRIVER_POSTINIT(postinit_call);
+\ No newline at end of file
+diff --git a/so3/so3/dts/rpi4.dts b/so3/so3/dts/rpi4.dts
+index a8adc3ce1f..5800bdbf78 100644
+--- a/so3/so3/dts/rpi4.dts
++++ b/so3/so3/dts/rpi4.dts
+@@ -77,7 +77,7 @@
+         compatible = "bcm,rpisense";
+ 		interrupt-parent = <&gic>;
+ 		interrupts = <0 113 4>;
+-		status = "disabled";
++		status = "ok";
+     };
+ 
+ 	vext {
+-- 
+GitLab
+

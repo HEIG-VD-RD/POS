@@ -1,0 +1,537 @@
+From c3161d8ef48edaa84d7ce0029541eee863150ae1 Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Fri, 6 Dec 2024 19:34:55 +0100
+Subject: [PATCH] Fin du labo11
+
+---
+ so3/so3/arch/arm32/so3.lds                 |  10 ++
+ so3/so3/devices/vext.c                     | 123 +++++++++++++++++----
+ so3/so3/dts/rpi4.dts                       |   5 +
+ so3/so3/dts/virt32.dts                     |   2 +-
+ so3/so3/include/initcall.h                 |   4 +
+ so3/so3/kernel/main.c                      |   9 ++
+ so3/usr/src/CMakeLists.txt                 |   6 +-
+ so3/usr/src/{vextctl.c => vextctl_simon.c} |   0
+ so3/usr/src/vextctl_vert_hori.c            |  79 +++++++++++++
+ target/rpi4.its                            |  43 ++++++-
+ 10 files changed, 256 insertions(+), 25 deletions(-)
+ rename so3/usr/src/{vextctl.c => vextctl_simon.c} (100%)
+ create mode 100644 so3/usr/src/vextctl_vert_hori.c
+
+diff --git a/so3/so3/arch/arm32/so3.lds b/so3/so3/arch/arm32/so3.lds
+index 0d745c2e2c..0ea619c5eb 100644
+--- a/so3/so3/arch/arm32/so3.lds
++++ b/so3/so3/arch/arm32/so3.lds
+@@ -121,6 +121,16 @@ SECTIONS
+ 	}
+ 	
+ 	__initcall_driver_initcall_t_postcore_end = .;
++
++
++    /* Initcall section for post-init functions */
++    __initcall_driver_initcall_vext_t_postinit = .;
++
++    .initcall_driver_initcall_t_postinit : {
++        *(.initcall_driver_initcall_vext_t_postinit);
++    }
++
++    __initcall_driver_initcall_vext_t_postinit_end = .;
+     
+     /* Initcall section for pre IRQ init functions which cannot be done with IRQs on */
+     
+diff --git a/so3/so3/devices/vext.c b/so3/so3/devices/vext.c
+index 2fcf5248f4..e0782de9d9 100644
+--- a/so3/so3/devices/vext.c
++++ b/so3/so3/devices/vext.c
+@@ -25,11 +25,13 @@
+ #include <completion.h>
+ #include <include/string.h>
+ #include <include/uapi/linux/input.h>
++#include <../include/device/arch/rpisense.h>
+ 
+ #include <device/driver.h>
+ 
+ #define BUFFER_MAX 10
+ 
++#define NUM_LEDS 5
+ #define LED_ID_MIN 0
+ #define LED_ID_MAX 4
+ #define SWITCH_ID_MIN 0
+@@ -39,10 +41,16 @@
+ #define NUM_SWITCHES 5
+ #define SWITCH_MASK 0xE
+ 
++typedef enum { VIRT32 = 1, RPI4 } platform_t;
+ 
+ // Array of keys for virt32
+ static int keys_virt32[] = { KEY_ENTER, KEY_LEFT, KEY_UP, KEY_RIGHT,  KEY_DOWN };
+ 
++typedef struct {
++    int id;
++    int state;
++} led_t;
++
+ typedef struct {
+     // Base address of the device
+     void* base;
+@@ -58,6 +66,10 @@ typedef struct {
+     u16 switch_value;
+     // Event structure
+     struct input_event ev;
++    // Platform type
++    platform_t platform;
++    // LED array
++    led_t leds[NUM_LEDS];
+ 
+ } private_vext_t;
+ 
+@@ -71,10 +83,11 @@ uint8_t decode_switch(uint8_t encoded_value)
+ {
+ 
+     if (encoded_value >= 1 && encoded_value <= 8) {
+-        return (1 << (encoded_value - 1)); // Reconstruct the original bitmask
++        // Reconstruct of the original bitmask
++        return (1 << (encoded_value - 1));
+     }
+     printk("(module) Invalid switch value: 0x%x\n", encoded_value);
+-    return 0x00; // Invalid encoding
++    return 00;
+ }
+ 
+ /**
+@@ -83,7 +96,6 @@ uint8_t decode_switch(uint8_t encoded_value)
+  * @param arg The private structure
+  */
+ static irq_return_t switch_interrupt_deferred(int irq, void* arg) {
+-
+     private_vext_t* priv = (private_vext_t*)arg;
+     complete(&priv->completion);
+     return IRQ_COMPLETED;
+@@ -108,6 +120,11 @@ static irq_return_t switch_interrupt_isr(int irq, void* arg) {
+     return IRQ_BOTTOM;
+ }
+ 
++// Might need it for the joystick
++/* void joystick_handler(void* arg, int key) {
++    printk("(module) Joystick key: %d\n", key);
++} */
++
+ /**
+  * @brief Write callback to  interact with the vext device (write a value to the leds)
+  * @param fd File descriptor
+@@ -134,21 +151,31 @@ static int vext_write(int fd, const void* buffer, int count) {
+         return -1;
+     }
+ 
+-
+     // Get the device class, private structure and device id
+     dev = devclass_by_fd(fd);
+     priv_vext = (private_vext_t*)devclass_get_priv(dev);
+     dev_id = devclass_fd_to_id(fd);
+ 
++    if (dev_id < 0 || dev_id >= 5) {
++        printk("(module) Invalid device ID: %d\n", dev_id);
++        return -1;
++    }
++
+     // Convert the buffer to an integer
+     data = (uint16_t)(*((char*)buffer) - '0');
+-    // Read the current state of the leds
+-    led_state = ioread16(priv_vext->led_addr);
+ 
+-    // Set the value to write to the led register
+-    value = data == 1 ? led_state | (1 << dev_id) : led_state & ~(1 << dev_id);
+-    // Write the value to the led register
+-    iowrite16(priv_vext->led_addr, value);
++    // Get the state of the leds
++    led_state = priv_vext->leds[dev_id].state;
++
++    // Write the value to the correct platform
++    if (priv_vext->platform == VIRT32) {
++        // Use the state of the leds to set the new state depending on the data
++        value = (data == 1) ? led_state | (1 << dev_id) : led_state & ~(1 << dev_id);
++        iowrite16(priv_vext->led_addr, value);
++    }
++    else if (priv_vext->platform == RPI4) {
++        display_led(dev_id, data);
++    }
+ 
+     return count;
+ }
+@@ -159,10 +186,10 @@ static int vext_write(int fd, const void* buffer, int count) {
+ static int vext_read(int fd, void* buffer, int count) {
+ 
+     int dev_id;
+-    uint16_t leds_state;
+     uint16_t unique_led;
+     struct devclass* dev;
+     private_vext_t* priv;
++    static int read_done;
+ 
+     if (!buffer || count < (2 * sizeof(char))) {
+         printk("(module) Invalid buffer or insufficient count for read.\n");
+@@ -172,14 +199,13 @@ static int vext_read(int fd, void* buffer, int count) {
+ 
+     // This is specifique for cat that won't stop otherwise
+     // Variable statique to keep trace of reading
+-    static int read_done = 0;
++    read_done = 0;
+     if (read_done) {
+         // If the read has already been done, return 0
+         read_done = 0;
+         return 0;
+     }
+ 
+-
+     // Get the device class, private structure and device id
+     dev = devclass_by_fd(fd);
+     priv = (private_vext_t*)devclass_get_priv(dev);
+@@ -190,10 +216,7 @@ static int vext_read(int fd, void* buffer, int count) {
+         return -1;
+     }
+ 
+-    // Read the state of the leds
+-    leds_state = ioread16(priv->led_addr);
+-    // Get the state of the led wanted with dev_id
+-    unique_led = (leds_state >> dev_id) & 0x1;
++    unique_led = priv->leds[dev_id].state;
+ 
+     // Write the state of the led to the buffer 
+     snprintf((char*)buffer, 2 * sizeof(char), "%d", unique_led);
+@@ -281,11 +304,12 @@ struct devclass vext_switch_dev = {
+ /**
+  * @brief Initialize the vext device
+  */
+-int vext_init(dev_t* dev, int fdt_offset) {
++int vext_virt32_init(dev_t* dev, int fdt_offset) {
+     int node;
+     int prop_len;
+     const char* propname;
+     const struct fdt_property* prop;
++    int i;
+ 
+     int node_switch;
+     int node_led;
+@@ -352,11 +376,70 @@ int vext_init(dev_t* dev, int fdt_offset) {
+     priv_vext->ev.type = EV_KEY;
+     priv_vext->ev.value = 1;
+ 
+-    printk("(module) Init done\n");
++    for (i = 0; i < NUM_LEDS; i++) {
++        priv_vext->leds[i].id = 1 << i;
++        priv_vext->leds[i].state = 0;
++    }
++
++    priv_vext->platform = VIRT32;
++
++    printk("(module) Init virt32 done\n");
+ 
+ 
+     return 0;
+ }
+ 
+ 
+-REGISTER_DRIVER_POSTCORE("arm,vext", vext_init);
++/**
++ * @brief Initialize the vext device
++ */
++int vext_rpi4_init(dev_t* dev, int fdt_offset) {
++    int i;
++    private_vext_t* priv_vext;
++
++    printk("(module) Init rpi4\n");
++
++    // Allocate memory for the private structure
++    priv_vext = malloc(sizeof(private_vext_t));
++    BUG_ON(!priv_vext);
++
++    // Set the private structure for the leds device
++    devclass_set_priv(&vext_dev, priv_vext);
++    // Set the private structure for the switch device
++    devclass_set_priv(&vext_switch_dev, priv_vext);
++    // Register the leds device
++    devclass_register(dev, &vext_dev);
++    // Register the switch device
++    devclass_register(dev, &vext_switch_dev);
++
++    // might need it at a later stage
++    //rpisense_joystick_handler_register(dev, joystick_handler);
++
++    priv_vext->platform = RPI4;
++
++    // Initialize the completion -> might be used for the joystick
++    //init_completion(&priv_vext->completion);
++
++    for (i = 0; i < NUM_LEDS; i++) {
++        priv_vext->leds[i].id = 1 << i;
++        priv_vext->leds[i].state = 0;
++    }
++
++    printk("(module) Init rpi4 done\n");
++
++
++    return 0;
++}
++
++/**
++ * @brief Postinit call to turn off the matrix
++ */
++void postinit_call(void) {
++    printk("Postinit call \n");
++    rpisense_matrix_off();
++}
++
++
++REGISTER_DRIVER_POSTCORE("arm,virt32,vext", vext_virt32_init);
++REGISTER_DRIVER_POSTCORE("arm,rpi4,vext", vext_rpi4_init);
++REGISTER_DRIVER_POSTINIT(postinit_call);
+\ No newline at end of file
+diff --git a/so3/so3/dts/rpi4.dts b/so3/so3/dts/rpi4.dts
+index 1c7d397728..a8adc3ce1f 100644
+--- a/so3/so3/dts/rpi4.dts
++++ b/so3/so3/dts/rpi4.dts
+@@ -79,5 +79,10 @@
+ 		interrupts = <0 113 4>;
+ 		status = "disabled";
+     };
++
++	vext {
++		compatible = "arm,rpi4,vext";
++		status = "ok";
++	};
+ 	
+ };
+diff --git a/so3/so3/dts/virt32.dts b/so3/so3/dts/virt32.dts
+index 545aad9644..f6e88f273e 100644
+--- a/so3/so3/dts/virt32.dts
++++ b/so3/so3/dts/virt32.dts
+@@ -126,7 +126,7 @@
+ 	};
+ 	
+ 	vext {
+-		compatible = "arm,vext";
++		compatible = "arm,virt32,vext";
+ 		status = "ok";
+ 		reg = <0x20000000 0x1000>;
+ 		interrupt-parent = <&gic>;
+diff --git a/so3/so3/include/initcall.h b/so3/so3/include/initcall.h
+index 35ad58ea16..3d40838e8b 100644
+--- a/so3/so3/include/initcall.h
++++ b/so3/so3/include/initcall.h
+@@ -53,8 +53,12 @@
+ 
+ typedef void (*pre_irq_init_t)(void);
+ 
++typedef void(*driver_initcall_vext_t)(void);
++
+ #define REGISTER_PRE_IRQ_INIT(_init) ll_entry_declare(pre_irq_init_t, core, _init) = _init;
++#define REGISTER_DRIVER_POSTINIT(_init) ll_entry_declare(driver_initcall_vext_t, postinit, _init) = _init;
+ 
++void driver_initcall(void);
+ void pre_irq_init(void);
+ 
+ #endif /* INITCALL_H */
+diff --git a/so3/so3/kernel/main.c b/so3/so3/kernel/main.c
+index be968a654b..1dc548b5c8 100644
+--- a/so3/so3/kernel/main.c
++++ b/so3/so3/kernel/main.c
+@@ -61,6 +61,15 @@ void pre_irq_init(void) {
+ void post_init(void) {
+ 
+ 	 /* To be completed */
++	 
++	 driver_initcall_vext_t *postinit_call;
++    int i;
++
++    postinit_call = ll_entry_start(driver_initcall_vext_t, postinit);
++
++    for (i = 0; i < ll_entry_count(driver_initcall_vext_t, postinit); i++) {
++        postinit_call[i]();
++    }
+ }
+ 
+ void *rest_init(void *dummy) {
+diff --git a/so3/usr/src/CMakeLists.txt b/so3/usr/src/CMakeLists.txt
+index 3b8fcd4264..4fd46d28ff 100644
+--- a/so3/usr/src/CMakeLists.txt
++++ b/so3/usr/src/CMakeLists.txt
+@@ -6,7 +6,8 @@ add_executable(time.elf time.c)
+ add_executable(ping.elf ping.c)
+ add_executable(echo.elf echo.c)
+ add_executable(cat.elf cat.c)
+-add_executable(vextctl.elf vextctl.c)
++add_executable(vextctl_simon.elf vextctl_simon.c)
++add_executable(vextctl_vert_hori.elf vextctl_vert_hori.c)
+ 
+ add_subdirectory(widgets)
+ add_subdirectory(stress)
+@@ -18,4 +19,5 @@ target_link_libraries(time.elf c)
+ target_link_libraries(ping.elf c)
+ target_link_libraries(echo.elf c)
+ target_link_libraries(cat.elf c)
+-target_link_libraries(vextctl.elf c)
++target_link_libraries(vextctl_simon.elf c)
++target_link_libraries(vextctl_vert_hori.elf c)
+diff --git a/so3/usr/src/vextctl.c b/so3/usr/src/vextctl_simon.c
+similarity index 100%
+rename from so3/usr/src/vextctl.c
+rename to so3/usr/src/vextctl_simon.c
+diff --git a/so3/usr/src/vextctl_vert_hori.c b/so3/usr/src/vextctl_vert_hori.c
+new file mode 100644
+index 0000000000..00de26316b
+--- /dev/null
++++ b/so3/usr/src/vextctl_vert_hori.c
+@@ -0,0 +1,79 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++
++#define HORIZONTAL_LEDS {"/dev/led1", "/dev/led0", "/dev/led3"}
++#define VERTICAL_LEDS {"/dev/led0", "/dev/led2", "/dev/led4"}
++#define DELAY 500000 // 500 ms
++
++/**
++ * @brief Set the state of an LED
++ * @param led_name The name of the LED
++ * @param state The state to set (0 or 1)
++ */
++void set_led_state(const char *led_name, int state)
++{
++	char led_brightness_path[256];
++	// Create the path to the LED brightness file
++	snprintf(led_brightness_path, sizeof(led_brightness_path), "%s", led_name);
++
++	int fd = open(led_brightness_path, O_WRONLY);
++	if (fd < 0)
++	{
++		perror("Error opening LED brightness");
++		exit(EXIT_FAILURE);
++	}
++
++	// Convert state to string ("0" or "1") and write to LED brightness
++	char state_str[2];
++	snprintf(state_str, sizeof(state_str), "%d", state);
++
++	// Write state to the LED and close the file
++	//lseek(fd, 0, SEEK_SET);
++	if (write(fd, state_str, strlen(state_str)) < 0)
++	{
++		perror("Error writing LED state");
++		close(fd);
++		exit(EXIT_FAILURE);
++	}
++	close(fd);
++}
++
++/**
++ * @brief Toggle the state of a set of LEDs
++ * @param leds_on The names of the LEDs to turn on
++ * @param leds_off The names of the LEDs to turn off
++ * @param count The number of LEDs to toggle
++ */
++void toggle_leds(const char **leds_on, const char **leds_off, int count)
++{
++	for (int i = 0; i < count; i++)
++	{
++		set_led_state(leds_off[i], 0);
++	}
++	for (int i = 0; i < count; i++)
++	{
++		set_led_state(leds_on[i], 1);
++	}
++}
++
++int main(int argc, char **argv)
++
++{
++	const char *horizontal_leds[] = HORIZONTAL_LEDS;
++	const char *vertical_leds[] = VERTICAL_LEDS;
++
++	while (1)
++	{
++		toggle_leds(horizontal_leds, vertical_leds, 3);
++		usleep(DELAY);
++
++		toggle_leds(vertical_leds, horizontal_leds, 3);
++		usleep(DELAY);
++	}
++
++	return 0;
++}
+diff --git a/target/rpi4.its b/target/rpi4.its
+index 93d30e2172..fa924006fa 100644
+--- a/target/rpi4.its
++++ b/target/rpi4.its
+@@ -33,7 +33,7 @@
+ 			entry = <0x01008000>;
+ 		};
+ 
+-	fdt_linux {
++		fdt_linux {
+ 			description = "Linux device tree blob";
+ 			data = /incbin/("../linux/linux/arch/arm/boot/dts/bcm2711-rpi-4-b.dtb");
+ 			type = "flat_dt";
+@@ -51,10 +51,43 @@
+ 			compression = "none";
+ 			load = <0x10c00000>;
+ 		};
++
++		linux_so3 {
++			description = "SO3 kernel";
++			data = /incbin/("../so3/so3/so3.bin");
++			type = "kernel";
++			arch = "arm";
++			os = "linux";
++			compression = "none";
++			load = <0x01008000>;
++			entry = <0x01008000>;
++		};
++
++		fdt_so3 {
++			description = "SO3 device tree blob";
++			data = /incbin/("../so3/so3/dts/rpi4.dtb");
++			type = "flat_dt";
++			arch = "arm";
++			compression = "none";
++			load = <0x04a00000>;
++		};
++
++		rootfs_so3 {
++			description = "SO3 root filesystem";
++			data = /incbin/("../rootfs/board/rpi4/rootfs.fat");
++			type = "ramdisk";
++			arch = "arm";
++			os = "linux";
++			compression = "none";
++			load = <0x04c0000>;
++		};
++
+ 	};
+ 
++
++
+ 	configurations {
+-		default = "conf_linux";
++		default = "conf_so3";
+ 
+ 		conf_linux {
+ 			description = "Linux on Raspberry Pi 4";
+@@ -62,6 +95,12 @@
+ 			fdt = "fdt_linux";
+ 			ramdisk = "initrd";
+ 		};
++		conf_so3 {
++			description = "SO3 kernel image with device tree and rootfs";
++			kernel = "linux_so3";
++			fdt = "fdt_so3";
++			ramdisk = "rootfs_so3";
++		};
+ 	};
+ 
+ };
+-- 
+GitLab
+

@@ -1,0 +1,81 @@
+From 3dcbed5d3160eb2a4adb8fb35aed25088d52dafd Mon Sep 17 00:00:00 2001
+From: "rafael.dousse" <rafael.dousse@heig-vd.ch>
+Date: Fri, 27 Sep 2024 13:17:48 +0200
+Subject: [PATCH] Fichiers du labo
+
+---
+ build.conf                                    |  4 +---
+ linux/linux/arch/arm/configs/virt32_defconfig |  2 +-
+ linux/usr/module/access.c                     | 23 +++++++++++++++++++
+ 3 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/build.conf b/build.conf
+index 38425eb979..0d74b258d1 100644
+--- a/build.conf
++++ b/build.conf
+@@ -1,4 +1,2 @@
+-PLATFORM := virt32
+-
+-
++PLATFORM := rpi4
+ 
+diff --git a/linux/linux/arch/arm/configs/virt32_defconfig b/linux/linux/arch/arm/configs/virt32_defconfig
+index 1a879fb6ef..d12eb02818 100644
+--- a/linux/linux/arch/arm/configs/virt32_defconfig
++++ b/linux/linux/arch/arm/configs/virt32_defconfig
+@@ -1887,7 +1887,7 @@ CONFIG_BCMA_POSSIBLE=y
+ # Multifunction device drivers
+ #
+ CONFIG_MFD_CORE=y
+-# CONFIG_MFD_RPISENSE_CORE is not set
++CONFIG_MFD_RPISENSE_CORE=y
+ # CONFIG_MFD_ACT8945A is not set
+ # CONFIG_MFD_AS3711 is not set
+ # CONFIG_MFD_AS3722 is not set
+diff --git a/linux/usr/module/access.c b/linux/usr/module/access.c
+index 2cf58cc91f..f33d47cb77 100644
+--- a/linux/usr/module/access.c
++++ b/linux/usr/module/access.c
+@@ -11,16 +11,39 @@
+ 
+ #include <asm/io.h>
+ 
++#define VEXT_BASE 0x20000000
++#define LED_OFFSET 0x3a
++#define LED_ON 0x1E
++#define LED_OFF 0x0
++
++// Pointer to the IO mapped memory
++void  *led_addr;
++
++/**
++ * @brief Module initialization
++ */
+ static int access_init(void) {
+ 
+ 	printk("access: small driver for accessing I/O ...\n");
+ 
++	// Access the I/O
++	led_addr = ioremap(VEXT_BASE + LED_OFFSET, 2);
++
++	// Write to the LEDS to turn them on
++	iowrite16(LED_ON, led_addr);
++
+ 	return 0;
+ }
+ 
++/**
++ * @brief Module exit
++ */
+ static void access_exit(void) {
+ 
+ 	printk("access: bye bye!\n");
++
++	// Turn off the leds
++	iowrite16(LED_OFF, led_addr);
+ }
+ 
+ module_init(access_init);
+-- 
+GitLab
+

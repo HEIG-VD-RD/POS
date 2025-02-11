@@ -1,0 +1,561 @@
+From 3fd532b8fcaf7b163a091982d6e64368ccf5cbab Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Wed, 29 Jan 2025 12:18:32 +0100
+Subject: [PATCH] =?UTF-8?q?Fin=20=C3=A9tapes=202=20et=203?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ linux/usr/Makefile        |   4 +-
+ linux/usr/module/accel.c  | 313 ++++++++++++++++++++++++++++++++++++++
+ linux/usr/src/Makefile    |   2 +-
+ linux/usr/src/accel_app.c | 189 +++++++++++++++++++++++
+ 4 files changed, 505 insertions(+), 3 deletions(-)
+ create mode 100644 linux/usr/module/accel.c
+ create mode 100644 linux/usr/src/accel_app.c
+
+diff --git a/linux/usr/Makefile b/linux/usr/Makefile
+index 0747ef1d54..56b850d772 100644
+--- a/linux/usr/Makefile
++++ b/linux/usr/Makefile
+@@ -23,13 +23,13 @@ AFLAGS      := -D__ASSEMBLY__
+ USR_CFLAGS      := -O0 -pipe -Wall  -D__ARM__  -g
+ 
+ # Compiler Options - Libraries parameters
+-USR_CFLAGS      += -ffreestanding -I. -Isrc/include -fno-common  
++USR_CFLAGS      += -ffreestanding -I. -Isrc/include -fno-common 
+ 
+ # Aggressive flags
+ USR_CFLAGS	+= -Wall -Werror 
+ 
+ # libc required
+-USR_CFLAGS	+= -std=c99  -D_GNU_SOURCE
++USR_CFLAGS	+= -std=c99  -D_GNU_SOURCE -lm
+ 
+ LDFLAGS      = -N -warn-common -warn-constructors -warn-multiple-gp -L $(LIBGCC_PATH) -lgcc 
+ 
+diff --git a/linux/usr/module/accel.c b/linux/usr/module/accel.c
+new file mode 100644
+index 0000000000..444fede7e0
+--- /dev/null
++++ b/linux/usr/module/accel.c
+@@ -0,0 +1,313 @@
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/platform_device.h>
++#include "linux/i2c.h"
++#include <linux/miscdevice.h>
++
++#define DRIVER_NAME "lsm9ds1_accel"
++#define LSM9DS1_REG_WHO_AM_I 0x0F
++#define LSM9DS1_REG_CTRL_REG6_XL 0x20
++#define LSM9DS1_REG_OUT_X_XL 0x28
++//#define LSM9DS1_REG_OUT_Y_XL 0x2A
++//#define LSM9DS1_REG_OUT_Z_XL 0x2C
++#define REG_OUT_TEMP_L 0x15
++//#define REG_OUT_TEMP_H 0x16
++
++#define DEV_ID 0x68
++#define SCALE_SHIFT 3
++
++#define SIZE_COORD 6
++#define SIZE_TEMP 2
++
++/**
++ * @brief Structure to store accelerometer data and temperature
++ */
++enum accel_scale {
++    FULL_SCALE_2G = 0,
++    FULL_SCALE_4G = 2,
++    FULL_SCALE_8G = 3,
++    FULL_SCALE_16G = 1,
++};
++
++/**
++ * @brief Structure to store accelerometer data and temperature
++ */
++typedef struct {
++    int16_t x;
++    int16_t y;
++    int16_t z;
++    int16_t temperature;
++    enum accel_scale scale;
++} accel_temp_t;
++
++/**
++ * @brief Private structure to store the driver data
++ */
++typedef struct {
++    struct i2c_client* client;
++    struct miscdevice miscdev;
++    accel_temp_t accel;
++} lsm9ds1_data_t;
++
++/**
++ * @brief Function to get the values from the accelerometer
++ * @param data Pointer to the private data structure
++ */
++int getValues(lsm9ds1_data_t* data) {
++    int ret;
++    uint8_t buf_xyz[SIZE_COORD];
++    uint8_t buf_temp[SIZE_TEMP];
++
++    // Read the WHO_AM_I register to check if the device is present
++    ret = i2c_smbus_read_byte_data(data->client, LSM9DS1_REG_CTRL_REG6_XL);
++    if (ret < 0) {
++        dev_err(&data->client->dev, "Failed to read CTRL_REG6_XL register\n");
++        return ret;
++    }
++
++    // Get the scale of the accelerometer
++    data->accel.scale = (ret >> SCALE_SHIFT) & 3;
++
++    // Read the accelerometer data from the X. Since we use block_read, we read the three registers at once by using the size
++    // The X, Y and Z registers are consecutive and on 16 bits
++    ret = i2c_smbus_read_i2c_block_data(data->client, LSM9DS1_REG_OUT_X_XL, SIZE_COORD, buf_xyz);
++    if (ret < 0) {
++        dev_err(&data->client->dev, "Failed to read accelerometer data\n");
++        return ret;
++    }
++
++    // The data is stored on 16 bits, we need to concatenate the two bytes
++    data->accel.x = (int16_t)(buf_xyz[1] << 8) | buf_xyz[0];
++    data->accel.y = (int16_t)(buf_xyz[3] << 8) | buf_xyz[2];
++    data->accel.z = (int16_t)(buf_xyz[5] << 8) | buf_xyz[4];
++    
++    // We do the same for the temperature.
++    ret = i2c_smbus_read_i2c_block_data(data->client, REG_OUT_TEMP_L, SIZE_TEMP, buf_temp);
++
++    if (ret < 0) {
++        dev_err(&data->client->dev, "Failed to read temperature data\n");
++        return ret;
++    }
++    // The temperature is stored on 12 bits, we need to concatenate the two bytes
++    data->accel.temperature = (int16_t)(buf_temp[1] << 8) | buf_temp[0];
++    // Value is on 12 bits and not 16, so we need a mask to keep only the 12 bits
++    data->accel.temperature &= 0x0FFF;
++    return 0;
++}
++
++/**
++ * @brief Function to read the accelerometer data from the misc device
++ */
++static ssize_t lsm9ds1_read(struct file* file, char __user* buf, size_t count,
++    loff_t* ppos)
++{
++    lsm9ds1_data_t* data;
++    int ret;
++
++    // Retrieve the private data structure
++    data = container_of(file->private_data, lsm9ds1_data_t, miscdev);
++
++    // Get the values from the accelerometer
++    ret = getValues(data);
++
++    if (ret < 0) {
++        return ret;
++    }
++
++    if (count != sizeof(accel_temp_t)) {
++        dev_err(&data->client->dev, "Buffer too small in user space\n");
++        return -EINVAL;
++    }
++    
++    // Copy the data to the user space
++    ret = copy_to_user(buf, &data->accel, sizeof(accel_temp_t));
++    if (ret != 0) {
++        dev_err(&data->client->dev, "Failed to copy data to user space\n");
++        return -EFAULT;
++    }
++
++    return sizeof(accel_temp_t);
++
++}
++
++/**
++ * @brief Function to write the accelerometer scale to the misc device
++ */
++static ssize_t lsm9ds1_write(struct file* file, const char __user* buf, size_t count, loff_t* ppos)
++{
++    lsm9ds1_data_t* data;
++    enum accel_scale new_scale;
++    uint8_t reg_value;
++    int ret;
++
++    // Retrieve the private data structure
++    data = container_of(file->private_data, lsm9ds1_data_t, miscdev);
++
++    ret = getValues(data);
++
++    if (ret < 0) {
++        return ret;
++    }
++
++    //  Check if the size of the data is correct
++    if (count != sizeof(enum accel_scale)) {
++        dev_err(&data->client->dev, "Invalid size, expected %lu bytes\n", sizeof(enum accel_scale));
++        return -EINVAL;
++    }
++
++    //  Copy the data from the user space
++    ret = copy_from_user(&new_scale, buf, sizeof(enum accel_scale));
++    if (ret != 0) {
++        dev_err(&data->client->dev, "Failed to copy data from user space\n");
++        return -EFAULT;
++    }
++
++    //  Read the current configuration of the accelerometer
++    reg_value = data->accel.scale;
++
++    //  Mask to reset the bits concerned (acceleration scale)
++    reg_value &= ~(0x18); 
++    // Apply the new scale
++    reg_value |= (new_scale << SCALE_SHIFT); 
++
++    // Write the new scale to the accelerometer
++    ret = i2c_smbus_write_byte_data(data->client, LSM9DS1_REG_CTRL_REG6_XL, reg_value);
++    if (ret < 0) {
++        dev_err(&data->client->dev, "Failed to write new scale to CTRL_REG6_XL\n");
++        return ret;
++    }
++
++    // Update the scale in the private data structure
++    data->accel.scale = new_scale;
++
++    return sizeof(enum accel_scale);
++}
++
++/**
++ * @brief File operations for the misc device
++ */
++static const struct file_operations accel_fops = {
++    .owner = THIS_MODULE,
++    .read = lsm9ds1_read,
++    .write = lsm9ds1_write,
++};
++
++/**
++ * @brief Sysfs function to display the temperature
++ */
++static ssize_t temperature_show(struct device* dev, struct device_attribute* attr, char* buf) {
++    lsm9ds1_data_t* data = dev_get_drvdata(dev);
++    int ret = getValues(data);
++    if (ret < 0) {
++        return ret;
++    }
++    return sysfs_emit(buf, "Temperature: %d\n",
++         data->accel.temperature);
++}
++
++static DEVICE_ATTR_RO(temperature);
++
++static struct attribute* temperature_attrs[] = {
++    &dev_attr_temperature.attr,
++    NULL,
++};
++
++static struct attribute_group temperature_attr_group = {
++    .attrs = temperature_attrs,
++};
++
++/**
++ * @brief Probe the accelerometer
++ */
++static int lsm9ds1_probe(struct i2c_client* client, const struct i2c_device_id* id) {
++    lsm9ds1_data_t* data;
++    int ret;
++
++    data = devm_kzalloc(&client->dev, sizeof(lsm9ds1_data_t), GFP_KERNEL);
++
++    if (!data) {
++        dev_err(&client->dev, "Failed to allocate memory\n");
++        return -ENOMEM;
++    }
++
++    // Set the private data structure in the client
++    i2c_set_clientdata(client, data);
++    data->client = client;
++
++    // Check if the device is present
++    ret = i2c_smbus_read_byte_data(client, LSM9DS1_REG_WHO_AM_I);
++    if (ret < 0) {
++        dev_err(&client->dev, "Failed to read WHO_AM_I register\n");
++        return ret;
++    }
++
++    // Check if the device is the right one
++    if (ret != DEV_ID) {
++        dev_err(&client->dev, "WHO_AM_I register returned 0x%02x, expected 0x%02x\n", ret, DEV_ID);
++        return -ENODEV;
++    }
++
++    // Configure the accelerometer
++    ret = i2c_smbus_write_byte_data(client, LSM9DS1_REG_CTRL_REG6_XL, (FULL_SCALE_2G << SCALE_SHIFT) | 0x20);
++    if (ret < 0) {
++        dev_err(&client->dev, "Failed to configure accelerometer\n");
++        return ret;
++    }
++
++    // Register the misc device
++    data->miscdev.minor = MISC_DYNAMIC_MINOR;
++    data->miscdev.name = DRIVER_NAME;
++    data->miscdev.fops = &accel_fops;
++
++    ret = misc_register(&data->miscdev);
++    if (ret < 0) {
++        dev_err(&client->dev, "Failed to register misc device\n");
++        return ret;
++    }
++
++    // Create the sysfs group (There is only the temperature, but we could add more attributes)
++    // Since client is used instead of a device, the group will be created in the device directory of the I2C device
++    // The temperature file can be found in something like /sys/devices/platform/soc/fe804000.i2c/i2c-8/8-006a/temperature
++    // To have the file in /sys/class, we would need to use a device structure or create a kobject...
++    ret = sysfs_create_group(&client->dev.kobj, &temperature_attr_group);
++
++    dev_info(&client->dev, "LSM9DS1 accelerometer probe successful\n");
++    return 0;
++}
++
++
++static int lsm9ds1_remove(struct i2c_client* client) {
++    lsm9ds1_data_t* data = i2c_get_clientdata(client);
++    misc_deregister(&data->miscdev);
++    sysfs_remove_group(&client->dev.kobj, &temperature_attr_group);
++    return 0;
++}
++
++static const struct i2c_device_id lsm9ds1_id[] = {
++    { "lsm9ds1-accel", 0 },
++    {}
++};
++
++static const struct of_device_id accel_of_match[] = {
++    {.compatible = "st,lsm9ds1-accel", },
++    { },
++};
++
++MODULE_DEVICE_TABLE(of, accel_of_match);
++
++static struct i2c_driver lsm9ds1_driver = {
++    .driver = {
++        .name = DRIVER_NAME,
++        .of_match_table = accel_of_match,
++    },
++    .probe = lsm9ds1_probe,
++    .remove = lsm9ds1_remove,
++    .id_table = lsm9ds1_id,
++};
++
++module_i2c_driver(lsm9ds1_driver);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Rafael Dousse");
++MODULE_DESCRIPTION("Driver Linux pour l'accéléromètre LSM9DS1");
+diff --git a/linux/usr/src/Makefile b/linux/usr/src/Makefile
+index 46ed5b2ca0..7a8aff2b55 100644
+--- a/linux/usr/src/Makefile
++++ b/linux/usr/src/Makefile
+@@ -1 +1 @@
+-TARGETS := display vextctl
++TARGETS := display vextctl accel_app
+diff --git a/linux/usr/src/accel_app.c b/linux/usr/src/accel_app.c
+new file mode 100644
+index 0000000000..1ae4a6cce5
+--- /dev/null
++++ b/linux/usr/src/accel_app.c
+@@ -0,0 +1,189 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdint.h>
++#include <sys/ioctl.h>
++#include <errno.h>
++#include <time.h>
++#include <math.h>
++#include <string.h>
++#include <stdbool.h>
++
++#define ANGLE 10
++#define RAD_TO_DEG (180.0 / M_PI)
++#define LED_PATH "/sys/class/leds/"
++#define DEVICE_PATH "/dev/lsm9ds1_accel"
++#define INTERVAL_TEMP 2 // Intervalle en secondes pour afficher la température
++
++#define NUM_LEDS 5
++
++// Array of LED names for the sysfs interface
++const char* leds[] = { "vext:led0", "vext:led1", "vext:led2", "vext:led3", "vext:led4" };
++
++// State of the LED
++typedef enum { OFF = 0, ON } state_t;
++
++// Scale of the accelerometer
++typedef enum {
++    FULL_SCALE_2G = 0,
++    FULL_SCALE_4G = 2,
++    FULL_SCALE_8G = 3,
++    FULL_SCALE_16G = 1,
++} accel_scale_t;
++
++// Structure to store accelerometer data and temperature
++typedef struct {
++    int16_t x;
++    int16_t y;
++    int16_t z;
++    int16_t temperature;
++    accel_scale_t scale;
++} accel_temp_t;
++
++// Structure to store roll and pitch angles
++typedef struct
++{
++    float pitch;
++    float roll;
++}angle_t;
++
++
++/**
++ * @brief Compute the roll and pitch angles from the accelerometer data
++ * @param x Acceleration on  X axis
++ * @param y Acceleration on  Y axis
++ * @param z Acceleration on  Z axis
++ * @param angles Pointer to the structure to store the angles
++ */
++void compute_angle(accel_temp_t data, angle_t* angles) {
++    angles->roll = atan2f((float)data.y, (float)data.z) * RAD_TO_DEG;
++    angles->pitch = atan2f(-(float)data.x, sqrt((float)(data.y * data.y) + (float)(data.z * data.z))) * RAD_TO_DEG;
++}
++
++/**
++ * @brief Set the state of an LED
++ * @param LED_number The name of the LED
++ * @param state The state to set (0 or 1)
++ */
++int set_led_state(int led_number, /* state_t state */ bool state)
++{
++    if (led_number < 0 || led_number >= NUM_LEDS)
++    {
++        printf("Invalid LED number. It should be a number between [0:4]\n");
++        return -1;
++    }
++
++
++    char led_brightness_path[256];
++    // Create the path to the LED brightness file
++    snprintf(led_brightness_path, sizeof(led_brightness_path), "%s%s/brightness", LED_PATH, leds[led_number]);
++
++    int fd = open(led_brightness_path, O_WRONLY);
++
++    if (fd < 0)
++    {
++        printf("Error opening LED brightness %s\n", led_brightness_path);
++        return -1;
++    }
++
++    // Convert state to string ("0" or "1") and write to LED brightness
++    char state_str[2];
++    snprintf(state_str, sizeof(state_str), "%d", state);
++
++    // Write state to the LED and close the file
++    lseek(fd, 0, SEEK_SET);
++    if (write(fd, state_str, strlen(state_str)) < 0)
++    {
++        perror("Error writing LED state");
++        close(fd);
++        return -1;
++    }
++    close(fd);
++    return 0;
++}
++
++/**
++ * @brief Set the state of all LEDs based on the roll and pitch angles
++ * @param angles The roll and pitch angles
++ * @param is_reversed True if the RPi4 is reversed
++ */
++void set_all_leds(angle_t angles, bool is_reversed) {
++
++    bool is_flat = fabs(angles.roll) < ANGLE && fabs(angles.pitch) < ANGLE;
++
++    // If the RPi4 is not reversed
++    if (!is_reversed) {
++        set_led_state(0, is_flat);
++        set_led_state(1, angles.pitch > ANGLE);
++        set_led_state(2, angles.roll < -ANGLE);
++        set_led_state(3, angles.pitch < -ANGLE);
++        set_led_state(4, angles.roll > ANGLE);
++    }
++    else {
++        set_led_state(0, !is_flat);
++        set_led_state(1, !(angles.pitch > ANGLE));
++        set_led_state(2, !(angles.roll < -ANGLE));
++        set_led_state(3, !(angles.pitch < -ANGLE));
++        set_led_state(4, !(angles.roll > ANGLE));
++    }
++}
++
++
++/**
++ * @brief Check if an interval has elapsed
++ */
++bool is_interval_elapsed(struct timespec* last, int interval_sec) {
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++
++    if ((now.tv_sec - last->tv_sec) >= interval_sec) {
++        *last = now;
++        return true;
++    }
++    return false;
++}
++
++
++int main(int argc, char** argv) {
++    int fd;
++    accel_temp_t data;
++    angle_t angles;
++    ssize_t ret;
++
++    struct timespec last_temp_display = { 0 };
++
++    // Initialize the last time the temperature was displayed
++    clock_gettime(CLOCK_MONOTONIC, &last_temp_display);
++
++    fd = open(DEVICE_PATH, O_RDONLY);
++    if (fd < 0) {
++        perror("Erreur lors de l'ouverture du fichier");
++        return EXIT_FAILURE;
++    }
++
++    while (1) {
++        // Read accelerometer data
++        ret = read(fd, &data, sizeof(accel_temp_t));
++        if (ret < 0) {
++            perror("Erreur lors de la lecture");
++            close(fd);
++            return EXIT_FAILURE;
++        }
++
++        compute_angle(data, &angles);
++
++        set_all_leds(angles, data.z < 0);
++
++        // Display temperature every INTERVAL_TEMP seconds
++        if (is_interval_elapsed(&last_temp_display, INTERVAL_TEMP)) {
++            // Not sure what is the calculation for the temperature in Celsius. 
++            // There also might be an error in the module code that reads the temperature.
++            printf("Température : %.2f °C\n", data.temperature);
++        }
++    }
++
++    close(fd);
++
++    return EXIT_SUCCESS;
++}
+-- 
+GitLab
+

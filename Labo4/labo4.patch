@@ -1,0 +1,402 @@
+From 551f3fc1d7ded0aafc8f4e68e53ca42a0e7a3529 Mon Sep 17 00:00:00 2001
+From: "rafael.dousse" <rafael.dousse@heig-vd.ch>
+Date: Sun, 20 Oct 2024 13:22:36 +0200
+Subject: [PATCH] End of lab 4 without etape4-Timer
+
+---
+ qemu/hw/arm/vext/vext.c          | 165 ++++++++++++++++++++++++++++---
+ qemu/hw/arm/virt.c               |   2 +-
+ u-boot/arch/arm/lib/interrupts.c |   3 +-
+ u-boot/cmd/hello.c               | 116 +++++++++++++++++++++-
+ u-boot/cmd/hello.h               |  10 ++
+ 5 files changed, 275 insertions(+), 21 deletions(-)
+ create mode 100644 u-boot/cmd/hello.h
+
+diff --git a/qemu/hw/arm/vext/vext.c b/qemu/hw/arm/vext/vext.c
+index 53a6da0b74..7d8df88489 100644
+--- a/qemu/hw/arm/vext/vext.c
++++ b/qemu/hw/arm/vext/vext.c
+@@ -18,35 +18,164 @@
+  */
+ #include "vext.h"
+ #include "vext_emul.h"
++#include "qemu/osdep.h"
++#include "hw/irq.h"
+ 
+-typedef struct vextState {
++#define PUSH_BUT_REG_ADDR 0x12
++#define IRQ_CTRL 0x18
++#define LED_REG 0x3A
++
++#define IRQ_ENABLE (1 << 7)
++#define IRQ_CLEAR (1 << 0)
++#define IRQ_STATUS (1 << 4)
++//Doesn't make sense, logic to disable the IRQ should be changed but not used for now
++#define IRQ_DISABLE (0 << 7)
++
++typedef struct vextState
++{
+ 	SysBusDevice busdev;
+ 	MemoryRegion iomem;
+ 	uint32_t led_status;
++	uint8_t sw_status;
++	qemu_irq irq;
++	uint16_t irq_ctrl;
+ } vextState_t;
+ 
++/**
++ * @brief Encode the switch value to a 3-bit encoding
++ * @param switch_value The value of the switch
++ */
++uint8_t encode_switch(uint8_t switch_value)
++{
++	// Use a loop to find the position of the set bit. Since we have 8-bits for the switch, we use 8 iterations
++	for (int i = 0; i < 8; i++)
++	{
++		if (switch_value & (1 << i))
++		{
++			return (i + 1); // Return the position as the 3-bit encoding + 1 since 0x0 is when we release the button
++		}
++	}
++	return 0x00; // Return 0x00 which means we release the button
++}
++/**
++ * @brief Process the switch value and raise the IRQ if needed
++ */
++void vext_process_switch(void *opaque, cJSON *packet)
++{
++	/* to be completed ... */
++	printf("qemu:Vext: vext_process_switch\n");
++	vextState_t *s = (vextState_t *)opaque;
++	char *dev = cJSON_GetObjectItem(packet, "device")->valuestring;
++	uint8_t sw_status;
++	if (!strcmp(dev, DEV_SWITCH))
++	{
++		sw_status = (uint8_t)(cJSON_GetObjectItem(packet, "status")->valueint);
++
++		s->sw_status = encode_switch(sw_status);
++
++		// If the switch is released, we don't need to raise the IRQ
++		if (sw_status == 0x0)
++		{
++			printf("qemu:Vext: Button released\n");
++			return;
++		}
++		// We need to check if the IRQ is enabled
++		if (!(s->irq_ctrl & (IRQ_ENABLE)))
++		{
++			printf("qemu:Vext: IRQ not enables \n");
++			return;
++		}
++		// We need to check if the IRQ is already active
++		if ((s->irq_ctrl & IRQ_STATUS))
++		{
++			printf("qemu:Vext:previous IRQ is still active. \n");
++			return;
++		}
++		// We raise the IRQ and encode the switch value
++		s->irq_ctrl |= IRQ_STATUS;
++		s->irq_ctrl |= s->sw_status << 1;
++		qemu_irq_raise(s->irq);
++	}
++}
++/**
++ * @brief Write the value of the switch, the IRQ control register and the LED register
++ */
+ static void vext_write(void *opaque, hwaddr addr, uint64_t value, unsigned size)
+ {
+-	printf("vext_write\n");
+-	cJSON *root = cJSON_CreateObject();
+-
+-	cJSON_AddStringToObject(root, "device", "led");
+-	cJSON_AddStringToObject(root, "status",	"run"); /* Value of type string */
+-	cJSON_AddNumberToObject(root, "value", value); /* Value of type integer */
+-	vext_cmd_post(root);
+-		
++	printf("qemu:Vext: vext_write\n");
++	vextState_t *s = (vextState_t *)opaque;
++
++	switch (addr)
++	{
++	case PUSH_BUT_REG_ADDR:
++		// Nothing
++		break;
++	case IRQ_CTRL:
++		// We check the value written. It specifies if we need to enable, disable or clear the IRQ
++		if (value & IRQ_ENABLE)
++		{
++			s->irq_ctrl |= IRQ_ENABLE;
++			printf("qemu:Vext: IRQ enabled\n");
++		}
++		//Logic to disable the IRQ should be changed....
++		if (value & IRQ_DISABLE)
++		{
++			s->irq_ctrl &= ~(IRQ_ENABLE);
++			printf("qemu:Vext: IRQ disabled\n");
++		}
++		if (value & IRQ_CLEAR)
++		{
++			qemu_irq_lower(s->irq);
++			s->irq_ctrl &= ~(IRQ_STATUS);
++			s->irq_ctrl &= ~(s->sw_status << 1);
++			printf("qemu:Vext: IRQ cleared and lowered\n");
++		}
++		break;
++	case LED_REG:
++		//printf("qemu:Vext Writing value %d to led\n", value);
++		cJSON *root = cJSON_CreateObject();
++
++		cJSON_AddStringToObject(root, "device", "led");
++		cJSON_AddNumberToObject(root, "value", value);
++		vext_cmd_post(root);
++
++		break;
++	default:
++		// Nothing
++		break;
++	}
+ }
++/**
++ * @brief Read the value of the switch, the IRQ control register and the LED register
++ */
++static uint64_t vext_read(void *opaque, hwaddr addr, unsigned size)
++{
++	vextState_t *s = (vextState_t *)opaque;
++
++	switch (addr)
++	{
++	case PUSH_BUT_REG_ADDR:
++		//printf("qemu:Vext: Switch read : %d\n", s->sw_status);
++		return (uint64_t)s->sw_status;
++	case IRQ_CTRL:
++		//printf("qemu:Vext: IRQ read : %d\n", s->irq_ctrl);
++		return (uint64_t)s->irq_ctrl;
++	case LED_REG:
++		//printf("qemu:Vext: Led read : %d\n", s->led_status);
++		return (uint64_t)s->led_status;
++	default:
++		// Nothing
++		return 0;
++	}
+ 
++	return (uint64_t)s->sw_status;
++}
+ static const MemoryRegionOps vext_ops = {
+ 	.write = vext_write,
++	.read = vext_read,
+ 	.endianness = DEVICE_NATIVE_ENDIAN,
+ };
+ 
+-void vext_process_switch(void *opaque, cJSON *packet)
+-{
+-	/* to be completed ... */
+-	printf("vext_process_switch\n");
+-}
+ static void vext_init(Object *obj)
+ {
+ 	/* to be completed ... */
+@@ -54,11 +183,17 @@ static void vext_init(Object *obj)
+ 	DeviceState *dev = DEVICE(obj);
+ 	vextState_t *s = OBJECT_CHECK(vextState_t, dev, "vext");
+ 	SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+-
++	// We initialize the memory region 
+ 	memory_region_init_io(&s->iomem, obj, &vext_ops, s, "vext", 0x1000);
++	// We map the memory region
+ 	sysbus_init_mmio(sbd, &s->iomem);
++	// We initialize the IRQ
++	sysbus_init_irq(sbd, &s->irq);
++	// We initialize the IRQ control register and enable the IRQ
++	s->irq_ctrl |= IRQ_ENABLE;
+ 	vext_emul_init(obj);
+ }
++
+ static const TypeInfo vext_info = {
+ 	.name = "vext",
+ 	.parent = TYPE_SYS_BUS_DEVICE,
+diff --git a/qemu/hw/arm/virt.c b/qemu/hw/arm/virt.c
+index c4f987e86e..a0b9002915 100644
+--- a/qemu/hw/arm/virt.c
++++ b/qemu/hw/arm/virt.c
+@@ -2369,7 +2369,7 @@ static void machvirt_init(MachineState *machine)
+             /* Attach the vext controller */
+             vms->vext = sysbus_create_simple("vext", 0x20000000, NULL);
+ #endif
+-#if 0
++#if 1
+             /* Attach vext IRQ to GIC IRQ #50 */
+             sysbus_connect_irq(SYS_BUS_DEVICE(vms->vext), 0, qdev_get_gpio_in(vms->gic, 50));
+ #endif
+diff --git a/u-boot/arch/arm/lib/interrupts.c b/u-boot/arch/arm/lib/interrupts.c
+index 35ef04ed6e..b3f520d38a 100644
+--- a/u-boot/arch/arm/lib/interrupts.c
++++ b/u-boot/arch/arm/lib/interrupts.c
+@@ -26,6 +26,7 @@
+ #include <asm/proc-armv/ptrace.h>
+ #include <asm/ptrace.h>
+ #include <asm/u-boot-arm.h>
++#include <../../../cmd/hello.h>
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
+@@ -198,6 +199,6 @@ void do_fiq (struct pt_regs *pt_regs)
+ void do_irq (struct pt_regs *pt_regs)
+ {
+   /* To be completed (POS) */
+-
++  handle_irq(pt_regs);
+   printf("Interrupt ReQuest !\n");
+ }
+diff --git a/u-boot/cmd/hello.c b/u-boot/cmd/hello.c
+index d3d446cc3b..0e45de701d 100644
+--- a/u-boot/cmd/hello.c
++++ b/u-boot/cmd/hello.c
+@@ -1,15 +1,123 @@
+-#include <common.h>
+-#include <command.h>
++#include "hello.h"
++
++// Base addresses for Distributor and CPU Interface
++#define GIC_DIST_BASE 0x08000000
++#define GIC_CPU_BASE 0x08010000
++#define INTERRUPT_NUMBER (50 + 32)
++#define CPU_TARGET_OFF 0x850
++
++// Vext base adress and register offset
++#define VEXT_BASE_ADDRESS 0x20000000
++#define PUSH_BUT_REG_OFF 0x12
++#define IRQ_CTRL 0x18
++#define LED_REG_OFF 0x3A
++
++// Used the get the correct value from the switches
++#define SWITCHES_MASK 0xE
++#define SW_1 0x1
++#define SW_2 0x2
++#define SW_3 0x3
++#define SW_4 0x4
++#define SW_5 0x5
++
++// Used to write the correct value to the LEDS
++#define LEDOFF 0x0
++#define LED1 0x1
++#define LED2 (1 << 1)
++#define LED3 (1 << 2)
++#define LED4 (1 << 3)
++#define LED5 (1 << 4)
++
++/**
++ * Callback to be called when handling the IRQ. 
++ * Here it allows us to turn the LEDS on when pushing the buttons
++ */
++void handle_irq(struct pt_regs *pt_regs)
++{
++	
++	volatile uint32_t *led_reg = (uint32_t *)(VEXT_BASE_ADDRESS + LED_REG_OFF);
++	volatile uint32_t *irq_ctrl = (uint32_t *)(VEXT_BASE_ADDRESS + IRQ_CTRL);
++	
++	// Get the button that was pushed
++	uint32_t pushed = (*irq_ctrl & SWITCHES_MASK) >> 1;
++
++	volatile uint32_t *icceoir = (uint32_t *)(GIC_CPU_BASE + GICC_EOIR);
++	volatile uint32_t *icciar = (uint32_t *)(GIC_CPU_BASE + GICC_IAR);
++	uint32_t irq_id = *icciar;
++
++	switch (pushed)
++	{
++	case SW_1:
++		*led_reg = LED1;
++		break;
++	case SW_2:
++		*led_reg = LED2;
++		break;
++	case SW_3:
++		*led_reg = LED3;
++		break;
++	case SW_4:
++		*led_reg = LED4;
++		break;
++	case SW_5:
++		*led_reg = LED5;
++		break;
++	default:
++		*led_reg = LEDOFF;
++		break;
++	}
++	// Clear IRQ
++	*irq_ctrl |= 0x1;
++	*icceoir = irq_id;
++}
++
++/**
++ * Function to configure interrupts
++ */
++void config_interrupt(int N)
++{
++	int reg_offset, index, value, address;
++	/* Configure the Interrupt Set-Enable Registers (ICDISERn).
++	 * reg_offset = (integer_div(N / 32) * 4
++	 * value = 1 << (N mod 32) */
++	reg_offset = (N >> 3) & 0xFFFFFFFC;
++	index = N & 0x1F;
++	value = 0x1 << index;
++	address = GIC_DIST_BASE + GICD_ISENABLERn + reg_offset;
++	/* Now that we know the register address and value, set the appropriate bit */
++	*(int *)address |= value;
++}
++
++/**
++ * GIC init callback
++*/
++void gic_init(void)
++{
++
++	config_interrupt(INTERRUPT_NUMBER);
++	// Set Interrupt Priority Mask Register, allow all priorities
++	*((volatile uint32_t *)(GIC_CPU_BASE + GICC_PMR)) = 0xFF;
++
++	// Enable CPU interface
++	*((volatile uint32_t *)(GIC_CPU_BASE + GICC_CTLR)) = 1;
++
++	// Enable Distributor
++	*((volatile uint32_t *)(GIC_DIST_BASE + GICD_CTLR)) = 1;
++	*((volatile uint32_t *)(GIC_DIST_BASE + CPU_TARGET_OFF)) = 0x01010101;
++	local_irq_enable();
++}
+ 
+ /**
+  * Function to be called for the command
+  */
+ static int do_hello(struct cmd_tbl *cmdtp, int flag, int argc,
+-		    char *const argv[])
++					char *const argv[])
+ {
++	gic_init();
++
+ 	printf("Oh hey beautiful!!\n");
+ 	return 0;
+ }
+ 
+-// Command 
++// Command
+ U_BOOT_CMD(hello, 1, 1, do_hello, "Nice to meet you", "")
+\ No newline at end of file
+diff --git a/u-boot/cmd/hello.h b/u-boot/cmd/hello.h
+new file mode 100644
+index 0000000000..62bfb297ad
+--- /dev/null
++++ b/u-boot/cmd/hello.h
+@@ -0,0 +1,10 @@
++#include <common.h>
++#include <command.h>
++#include <asm/gic.h>
++
++
++#ifndef HELLO_H
++#define HELLO_H
++
++void handle_irq(struct pt_regs *pt_regs);
++#endif
+\ No newline at end of file
+-- 
+GitLab
+

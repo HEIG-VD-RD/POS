@@ -1,0 +1,121 @@
+From 53ba8a3c4e5a87221515cb2be5492b0d38a057e3 Mon Sep 17 00:00:00 2001
+From: Rafou2898 <rafael.dousse@heig-vd.ch>
+Date: Fri, 17 Jan 2025 11:38:10 +0100
+Subject: [PATCH] =?UTF-8?q?Fin=20de=20l'=C3=A9tape=201....?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ build.conf                                    |  2 +-
+ .../boot/dts/broadcom/bcm2711-rpi-4-b.dts     |  6 +++
+ linux/usr/Makefile                            |  5 +-
+ target/rpi4_64.its                            | 49 +++++++++++++++++++
+ 4 files changed, 59 insertions(+), 3 deletions(-)
+ create mode 100644 target/rpi4_64.its
+
+diff --git a/build.conf b/build.conf
+index cbf07a034e..53ad17242e 100644
+--- a/build.conf
++++ b/build.conf
+@@ -1 +1 @@
+-PLATFORM := virt32
++PLATFORM := rpi4_64
+diff --git a/linux/linux/arch/arm64/boot/dts/broadcom/bcm2711-rpi-4-b.dts b/linux/linux/arch/arm64/boot/dts/broadcom/bcm2711-rpi-4-b.dts
+index 7ae1cfe1a3..01de3d1b32 100644
+--- a/linux/linux/arch/arm64/boot/dts/broadcom/bcm2711-rpi-4-b.dts
++++ b/linux/linux/arch/arm64/boot/dts/broadcom/bcm2711-rpi-4-b.dts
+@@ -29,6 +29,12 @@ memory@0 {
+ 		device_type = "memory";
+ 		reg = <0 0 0x20000000>;
+ 	};
++
++	vext {	
++		compatible = "rpi4,vext";
++		platform_type = "rpi4";
++		/*reg = <0x0 0x20000000 0x0 0x1000>;*/
++	};
+ 	
+ 	aliases {
+ 		serial0 = &uart1;
+diff --git a/linux/usr/Makefile b/linux/usr/Makefile
+index e0c16885b9..0747ef1d54 100644
+--- a/linux/usr/Makefile
++++ b/linux/usr/Makefile
+@@ -5,7 +5,8 @@
+ # First setup the building environment
+ 
+ 
+-GCC       = arm-linux-gnueabihf-
++#GCC       = arm-linux-gnueabihf-
++GCC       = aarch64-linux-gnu-
+ CC           = $(GCC)gcc
+ AS           = $(GCC)as
+ AR           = $(GCC)ar
+@@ -19,7 +20,7 @@ LIBGCC_PATH := $(shell dirname `$(CC) $(USR_CFLAGS) -print-libgcc-file-name`)
+ AFLAGS      := -D__ASSEMBLY__
+ 
+ # Compiler Options - Optimisation, warnings and compiler execution parameters
+-USR_CFLAGS      := -O0 -pipe -Wall  -D__ARM__ -marm  -mno-thumb-interwork  -g
++USR_CFLAGS      := -O0 -pipe -Wall  -D__ARM__  -g
+ 
+ # Compiler Options - Libraries parameters
+ USR_CFLAGS      += -ffreestanding -I. -Isrc/include -fno-common  
+diff --git a/target/rpi4_64.its b/target/rpi4_64.its
+new file mode 100644
+index 0000000000..0f71ebeb9b
+--- /dev/null
++++ b/target/rpi4_64.its
+@@ -0,0 +1,49 @@
++/dts-v1/;
++
++/ {
++	description = "Kernel and rootfs components for Raspberry Pi 4 environment";
++
++	images {
++		linux {
++			description = "Linux kernel";
++			data = /incbin/("../linux/linux/arch/arm64/boot/Image");
++			type = "kernel";
++			arch = "arm64";
++			os = "linux";
++			compression = "none";
++			load = <0x01000000>;
++			entry = <0x01000000>;
++		};
++
++		fdt_linux {
++			description = "Linux device tree blob";
++			data = /incbin/("../linux/linux/arch/arm64/boot/dts/broadcom/bcm2711-rpi-4-b.dtb");
++			type = "flat_dt";
++			arch = "arm64";
++			compression = "none";
++			load = <0x10a00000>;
++		};
++
++		initrd {
++			description = "Initial rootfs (initrd)";
++			data = /incbin/("../rootfs/board/rpi4_64/initrd.cpio");
++			type = "ramdisk";
++			arch = "arm64";
++			os = "linux";
++			compression = "none";
++			load = <0x10c00000>;
++		};
++	};
++
++	configurations {
++		default = "conf_linux";
++
++		conf_linux {
++			description = "Linux on Raspberry Pi 4";
++			kernel = "linux";
++			fdt = "fdt_linux";
++			ramdisk = "initrd";
++		};
++	};
++
++};
+-- 
+GitLab
+
