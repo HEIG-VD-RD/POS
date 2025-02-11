@@ -15,5 +15,5 @@ This repository contains all my practical work related to the Operating Systems 
 [Labo12](Labo12) <br>
 [Labo13](Labo13) <br>
 [Labo14](Labo14) <br>
-[Labo14](Labo15) <br>
-[Labo14](Labo16) <br>
+[Labo15](Labo15) <br>
+
