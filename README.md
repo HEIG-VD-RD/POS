@@ -16,4 +16,3 @@ This repository contains all my practical work related to the Operating Systems 
 [Labo13](lab13) <br>
 [Labo14](lab14) <br>
 [Labo14](lab15) <br>
-[Labo14](lab16) <br>
